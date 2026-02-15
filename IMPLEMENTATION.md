@@ -1,6 +1,6 @@
 # AI Inference Integration Guide
 
-This document explains how to plug in custom AI models for person detection, face matching, obstacle detection, and segmentation. Each component has a clean interface — swap the implementation without changing the pipeline.
+This document explains how the AI components work and how to swap them for custom models. Each component has a clean interface — replace the implementation without changing the pipeline.
 
 ---
 
@@ -9,24 +9,23 @@ This document explains how to plug in custom AI models for person detection, fac
 The frame processing pipeline runs in `server/ws_handler.py`. Each frame flows through different processing stages depending on the current state:
 
 ```
-Phone frame (JPEG) → decode → state router
-                                  │
-                    ┌─────────────┼─────────────────┐
-                    ▼             ▼                  ▼
-              NAVIGATION    IDENTIFICATION       APPROACH
-                    │             │                  │
-              ┌─────┘       ┌─────┘            ┌─────┘
-              ▼             ▼                  ▼
-        GPS waypoint   SAM masks          SAM masks
-        following      → person_detector   → person_detector
-              │        → face_matcher      → face_matcher
-              ▼             │              → approach_command
-        obstacle_detect     ▼                  │
-        (optional)     match found?            ▼
-              │             │             bbox tracking
-              ▼             ▼                  │
-        movement cmd   transition to       movement cmd
-                       APPROACH            or "arrived"
+Phone frame (JPEG) -> decode -> state router
+                                  |
+                    +-------------+------------------+
+                    v             v                   v
+              NAVIGATION    IDENTIFICATION        APPROACH
+                    |             |                   |
+              GPS waypoint   YOLOv8 detect       YOLOv8 detect
+              following      -> face_matcher      -> face_matcher
+                    |             |               -> approach_command
+                    v             v                   |
+              movement cmd   match found?            v
+                             -> APPROACH         bbox tracking
+                                                 or "arrived"
+
+  (any state with detect toggle ON)
+              -> YOLOv8 detect
+              -> face_matcher (if reference photo uploaded)
 ```
 
 ### Key files
@@ -34,162 +33,71 @@ Phone frame (JPEG) → decode → state router
 | File | Role |
 |------|------|
 | `server/ws_handler.py` | Frame pipeline — calls each component |
-| `server/models/sam_loader.py` | SAM model loading & mask generation |
-| `server/identification/person_detector.py` | Filters SAM masks for person shapes |
-| `server/identification/face_matcher.py` | Compares face crops to reference photo |
-| `server/identification/approach.py` | Bbox → movement commands |
-| `server/navigation/obstacle_avoidance.py` | Pluggable obstacle detection backends |
+| `server/identification/person_detector.py` | YOLOv8 nano person detection |
+| `server/identification/face_matcher.py` | AWS Rekognition face comparison |
+| `server/identification/approach.py` | Bbox -> movement commands |
+| `server/navigation/obstacle_avoidance.py` | Obstacle detection stub (placeholder) |
 | `server/config.py` | All tuneable parameters (.env) |
 
 ---
 
-## 1. Segmentation (SAM)
+## 1. Person Detection (YOLOv8)
 
-**File:** `server/models/sam_loader.py`
+**File:** `server/identification/person_detector.py`
 
-The `SAMInference` class wraps Facebook's Segment Anything Model. It generates masks for every distinct region in a frame.
+Uses YOLOv8 nano for fast, accurate person detection. The model auto-downloads (~6MB) on first use.
 
 ### Interface
 
 ```python
-class SAMInference:
-    def load(self) -> None:
-        """Load model at startup. Called once."""
-
-    def generate_masks(self, image: np.ndarray) -> List[Dict]:
+class PersonDetector:
+    def detect(self, frame: np.ndarray) -> List[Dict]:
         """
         Args:
-            image: BGR numpy array (H, W, 3)
+            frame: BGR numpy array (H, W, 3)
 
         Returns:
-            List of mask dicts, each containing:
-              - 'segmentation': bool array (H, W)
-              - 'area': int (pixel count)
-              - 'bbox': [x, y, w, h]
-              - 'predicted_iou': float
-              - 'stability_score': float
+            List of person detections:
+              - 'bbox': [x1, y1, x2, y2] pixel coordinates (int)
+              - 'confidence': float (0-1)
         """
 ```
 
 ### Current implementation
 
-- **Model:** SAM ViT-B (`sam_vit_b_01ec64.pth`, 358 MB)
-- **Generator params:** `points_per_side=16`, `pred_iou_thresh=0.86`, `stability_score_thresh=0.92`, `min_mask_region_area=500`
-- **Device:** CUDA with CPU fallback
+- **Model:** YOLOv8n (`yolov8n.pt`, ~6MB, auto-downloads)
+- **Class filter:** COCO class 0 (person) only
+- **Confidence threshold:** `PERSON_CONFIDENCE_THRESHOLD` (default 0.4)
+- **Speed:** ~20-50ms on CPU, ~5-10ms on GPU
+- **Lazy loading:** Model loaded on first `detect()` call
 
 ### How to replace
 
-To use a different segmentation model (e.g., SAM2, FastSAM, YOLO-Seg), edit `sam_loader.py` and keep the same return format. The rest of the pipeline only cares about the mask dict shape.
+To use a different detector (e.g., YOLOv8s for better accuracy, or a custom model):
 
 ```python
-# Example: replace with FastSAM
-class SAMInference:
-    def load(self):
+class PersonDetector:
+    def _load(self):
         from ultralytics import YOLO
-        self._model = YOLO("FastSAM-x.pt")
-        self._loaded = True
+        self._model = YOLO("yolov8s.pt")  # or your custom model
 
-    def generate_masks(self, image: np.ndarray) -> List[Dict]:
-        rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        results = self._model(rgb, retina_masks=True)
-        masks = []
-        for r in results:
-            for i, mask in enumerate(r.masks.data):
-                seg = mask.cpu().numpy().astype(bool)
-                bbox = r.boxes.xywh[i].cpu().numpy().tolist()
-                masks.append({
-                    "segmentation": seg,
-                    "area": int(seg.sum()),
-                    "bbox": bbox,
-                    "predicted_iou": float(r.boxes.conf[i]),
-                    "stability_score": float(r.boxes.conf[i]),
-                })
-        masks.sort(key=lambda x: x["area"], reverse=True)
-        return masks
+    def detect(self, frame: np.ndarray) -> List[Dict]:
+        # Just keep the same return format: [{"bbox": [...], "confidence": float}]
 ```
 
 ### Config
 
 ```env
-SAM_MODEL_TYPE=vit_b          # vit_b | vit_l | vit_h
-SAM_CHECKPOINT_PATH=models/sam_vit_b_01ec64.pth
-SAM_DEVICE=cuda               # cuda | cpu
+PERSON_CONFIDENCE_THRESHOLD=0.4    # minimum YOLO confidence to accept detection
 ```
 
 ---
 
-## 2. Person Detection
-
-**File:** `server/identification/person_detector.py`
-
-Filters SAM masks into person candidates using shape heuristics. Called during `IDENTIFICATION` and `APPROACH` states.
-
-### Interface
-
-```python
-def detect_persons(
-    frame: np.ndarray,       # BGR image (H, W, 3)
-    masks: List[Dict],       # SAM mask dicts
-) -> List[Dict]:
-    """
-    Returns list of person detections:
-      - 'bbox': [x1, y1, x2, y2] pixel coordinates
-      - 'area': int
-      - 'mask': bool array (H, W)
-      - 'confidence': float (0-1)
-    """
-```
-
-### Current implementation (heuristic)
-
-Filters on:
-- **Aspect ratio:** 1.2–5.0 (people are taller than wide)
-- **Area:** 1–60% of frame
-- **Height:** at least 10% of frame height
-- **Width:** at most 50% of frame width
-- **Color variance:** HSV hue standard deviation (rejects uniform sky/grass)
-
-Confidence is a heuristic score based on how well the mask fits expected person proportions.
-
-### How to replace with a real detector
-
-For better accuracy, replace the heuristic filter with YOLO, Detectron2, or any object detector:
-
-```python
-# Example: YOLO person detection (ignores SAM masks entirely)
-from ultralytics import YOLO
-
-_model = None
-
-def detect_persons(frame: np.ndarray, masks: List[Dict]) -> List[Dict]:
-    global _model
-    if _model is None:
-        _model = YOLO("yolov8n.pt")
-
-    results = _model(frame, classes=[0])  # class 0 = person
-    persons = []
-    for r in results:
-        for box in r.boxes:
-            x1, y1, x2, y2 = box.xyxy[0].cpu().numpy().astype(int)
-            persons.append({
-                "bbox": [int(x1), int(y1), int(x2), int(y2)],
-                "area": int((x2 - x1) * (y2 - y1)),
-                "mask": None,
-                "confidence": float(box.conf[0]),
-            })
-    persons.sort(key=lambda p: p["confidence"], reverse=True)
-    return persons
-```
-
-If you use a dedicated person detector, you can also skip SAM entirely during identification — just don't call `sam.generate_masks()` in `ws_handler.py`.
-
----
-
-## 3. Face Matching
+## 2. Face Matching (AWS Rekognition)
 
 **File:** `server/identification/face_matcher.py`
 
-Compares a cropped face region against the reference photo to identify the target person. Called for each person candidate during `IDENTIFICATION` and `APPROACH`.
+Compares a cropped person region against the reference photo. Called for each YOLO detection during `IDENTIFICATION`, `APPROACH`, and dashboard detect-only mode.
 
 ### Interface
 
@@ -207,7 +115,11 @@ def compare_face(
 
 ### Current implementation
 
-Uses **AWS Rekognition** `CompareFaces` API. Requires AWS credentials.
+- **Service:** AWS Rekognition `CompareFaces` API
+- **Input:** Raw JPEG bytes (no S3 upload needed)
+- **Minimum crop size:** 20x20 pixels
+- **Threshold:** `REKOGNITION_SIMILARITY_THRESHOLD` (default 90%)
+- **Credentials:** Via environment variables or AWS default credentials chain
 
 ### How to replace with local inference
 
@@ -221,41 +133,30 @@ from insightface.app import FaceAnalysis
 _app = None
 _ref_embedding = None
 
-def _get_app():
-    global _app
+def compare_face(reference_bytes: bytes, face_crop: np.ndarray) -> Optional[Dict]:
+    global _app, _ref_embedding
     if _app is None:
         _app = FaceAnalysis(allowed_modules=["detection", "recognition"])
-        _app.prepare(ctx_id=0)  # 0 = GPU, -1 = CPU
-    return _app
+        _app.prepare(ctx_id=-1)  # -1 = CPU
 
-def set_reference(reference_bytes: bytes):
-    """Call once when mission starts to cache reference embedding."""
-    global _ref_embedding
-    arr = np.frombuffer(reference_bytes, dtype=np.uint8)
-    img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-    app = _get_app()
-    faces = app.get(img)
-    if faces:
-        _ref_embedding = faces[0].embedding
-
-def compare_face(reference_bytes: bytes, face_crop: np.ndarray) -> Optional[Dict]:
-    global _ref_embedding
     if _ref_embedding is None:
-        set_reference(reference_bytes)
+        arr = np.frombuffer(reference_bytes, dtype=np.uint8)
+        img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        faces = _app.get(img)
+        if faces:
+            _ref_embedding = faces[0].embedding
+
     if _ref_embedding is None:
         return None
 
-    app = _get_app()
-    faces = app.get(face_crop)
+    faces = _app.get(face_crop)
     if not faces:
         return None
 
     best = max(faces, key=lambda f: np.dot(f.embedding, _ref_embedding))
     similarity = float(np.dot(best.embedding, _ref_embedding) /
                        (np.linalg.norm(best.embedding) * np.linalg.norm(_ref_embedding)))
-    confidence = max(0, similarity * 100)  # scale to 0-100
-
-    return {"confidence": confidence, "bounding_box": {}}
+    return {"confidence": max(0, similarity * 100), "bounding_box": {}}
 ```
 
 ### Config
@@ -269,81 +170,49 @@ REKOGNITION_SIMILARITY_THRESHOLD=90.0    # minimum confidence to accept match
 
 ---
 
-## 4. Obstacle Detection
+## 3. Obstacle Detection
 
 **File:** `server/navigation/obstacle_avoidance.py`
 
-Pluggable backend system for detecting obstacles during `NAVIGATION`. Disabled by default.
+Currently a stub that always returns `None`. The interface is preserved so a proper detection backend can be dropped in later.
 
 ### Interface
 
 ```python
-# Backend signature
-def my_detector(
-    frame: np.ndarray,       # BGR image (H, W, 3)
-    masks: List[Dict],       # SAM masks (may be empty if SAM disabled)
-) -> Optional[Dict]:
+def detect_obstacles(frame: np.ndarray) -> Optional[Dict]:
     """
     Returns:
       - {"direction": str, "intensity": float, "duration_ms": int} to avoid
-      - {"direction": str, "intensity": float, "duration_ms": int, "reroute": True}
-        to avoid AND trigger route replanning from current GPS position
+      - {"direction": ..., "reroute": True} to avoid AND trigger route replanning
       - None if path is clear
     """
 ```
 
-### Registering a backend
+### How to implement
+
+Replace the stub with a depth estimation or object detection model:
 
 ```python
-from navigation.obstacle_avoidance import register_backend
-
-def my_depth_obstacle_detector(frame, masks):
-    # Run depth estimation
-    depth_map = estimate_depth(frame)  # your depth model
+def detect_obstacles(frame: np.ndarray) -> Optional[Dict]:
+    depth_map = estimate_depth(frame)  # your depth model (MiDaS, ZoeDepth, etc.)
+    h, w = depth_map.shape
     center_depth = depth_map[h//3:2*h//3, w//3:2*w//3].mean()
 
     if center_depth < 5.0:  # obstacle within 5 meters
-        # Find clearest direction
         left_depth = depth_map[:, :w//3].mean()
         right_depth = depth_map[:, 2*w//3:].mean()
-        direction = "left" if left_depth > right_depth else "right"
         return {
-            "direction": direction,
+            "direction": "left" if left_depth > right_depth else "right",
             "intensity": 0.7,
             "duration_ms": 600,
-            "reroute": True,  # trigger OSRM reroute from current position
+            "reroute": True,
         }
     return None
-
-register_backend("depth", my_depth_obstacle_detector)
 ```
-
-### Built-in placeholder
-
-There's an HSV sky-detection backend (`_hsv_sky_detector`) included as an example but **not registered by default**. To enable it:
-
-```python
-from navigation.obstacle_avoidance import register_backend, _hsv_sky_detector
-register_backend("hsv_sky", _hsv_sky_detector)
-```
-
-### Rerouting
-
-When a backend returns `"reroute": True`, the pipeline calls `_reroute_from_current_position()` in `ws_handler.py`, which gets fresh OSRM waypoints from the drone's current GPS to the destination and replaces the remaining route.
-
-### Config
-
-```env
-OBSTACLE_DETECTION_ENABLED=false   # set to true to enable
-```
-
-Constants in `config.py`:
-- `OBSTACLE_CENTER_THRESHOLD = 0.3` — fraction of frame center considered "in path"
-- `OBSTACLE_MIN_AREA_FRACTION = 0.05` — minimum segment area to count as obstacle
 
 ---
 
-## 5. Approach Control
+## 4. Approach Control
 
 **File:** `server/identification/approach.py`
 
@@ -371,109 +240,78 @@ def compute_approach_command(
 | `ARRIVAL_AREA_THRESHOLD` | 0.15 | Person bbox area fraction to trigger delivery |
 | `CENTER_DEAD_ZONE` | 0.15 | Fraction of frame center where no correction is applied |
 
-### Tuning
-
-- **Increase `ARRIVAL_AREA_THRESHOLD`** to make the drone get closer before delivering
-- **Decrease `CENTER_DEAD_ZONE`** for more precise centering (may cause oscillation)
-- Movement intensity scales with the offset from center (capped at 0.8)
-
 ---
 
-## 6. Navigation Commands
+## 5. Dashboard Detect Mode
 
-**File:** `server/navigation/commander.py`
+The dashboard at `/dashboard` has a **Detect** toggle that runs person detection + face matching outside of any mission state. This is useful for testing.
 
-Converts GPS positions to drone movement commands via bearing computation.
+### How it works
 
-### Interface
+1. Dashboard sends `{"type": "toggle_detect"}` via WebSocket
+2. Server sets `detect_enabled = True` on `ConnectionManager`
+3. On every 10th frame (to preserve FPS), `_process_detect_only()` runs:
+   - YOLOv8 person detection in a thread executor
+   - If a reference photo is available, each YOLO crop is sent to Rekognition
+   - Results cached and reused for intermediate frames
+4. Detections broadcast to dashboard as metadata (green = matched, red = unmatched)
 
-```python
-def compute_navigation_command(
-    current_lat: float, current_lng: float,
-    target_lat: float, target_lng: float,
-) -> Dict:
-    """
-    Returns: {"direction": str, "intensity": float}
-    Directions: "forward", "rotate_cw", "rotate_ccw"
-    """
-```
+### Reference photo flow
 
-### Config
-
-```env
-WAYPOINT_REACHED_RADIUS_M=10.0    # meters to consider waypoint reached
-IDENTIFICATION_RANGE_M=50.0       # meters from destination to switch to identification
-```
+- Phone sends `{"type": "reference_photo", "photo": "<base64>"}` on upload or stream start
+- Server stores bytes in `ConnectionManager.reference_photo_bytes`
+- Dashboard metadata includes `has_reference: true/false` for status display
 
 ---
 
 ## Pipeline Flow (ws_handler.py)
 
-Here's exactly where each component is called:
-
 ### NAVIGATION state (`_process_navigation`)
 ```
-1. Check if within IDENTIFICATION_RANGE_M of destination → switch to IDENTIFICATION
-2. Check if within WAYPOINT_REACHED_RADIUS_M of current waypoint → advance
-3. If OBSTACLE_DETECTION_ENABLED:
-   a. Run SAM on frame
-   b. Run obstacle backend on (frame, masks)
-   c. If obstacle found: send avoidance command, optionally reroute
-4. Else: compute_navigation_command() toward next waypoint
+1. Check if within IDENTIFICATION_RANGE_M of destination -> switch to IDENTIFICATION
+2. Check if within WAYPOINT_REACHED_RADIUS_M of current waypoint -> advance
+3. Run detect_obstacles(frame) -> currently returns None (stub)
+4. compute_navigation_command() toward next waypoint
 ```
 
 ### IDENTIFICATION state (`_process_identification`)
 ```
-1. Run SAM on frame → masks
-2. detect_persons(frame, masks) → person candidates
-3. If no persons: rotate slowly to scan
-4. For each person:
+1. Run YOLOv8 on frame -> person detections (in thread executor)
+2. If no persons: rotate slowly to scan
+3. For each person:
    a. Crop face region from bbox
-   b. compare_face(reference, crop) → confidence
+   b. compare_face(reference, crop) -> confidence
    c. If confidence >= threshold: transition to APPROACH
-5. If no match: keep rotating
+4. If no match: keep rotating
 ```
 
 ### APPROACH state (`_process_approach`)
 ```
-1. Run SAM on frame → masks
-2. detect_persons(frame, masks) → person candidates
-3. Re-match each person against reference photo
-4. Track best match by confidence
-5. If lost (no match): fall back to IDENTIFICATION
-6. compute_approach_command(bbox, frame_size) → command
-7. If arrived: transition to DELIVERY + hover
+1. Run YOLOv8 on frame -> person detections (in thread executor)
+2. Re-match each person against reference photo via Rekognition
+3. Track best match by confidence
+4. If lost (no match): fall back to IDENTIFICATION
+5. compute_approach_command(bbox, frame_size) -> command
+6. If arrived: transition to DELIVERY + hover
 ```
 
----
-
-## Quick Start: Minimal Local Setup
-
-To run without AWS credentials using local models:
-
-```bash
-# 1. Install dependencies
-pip install insightface onnxruntime-gpu ultralytics
-
-# 2. Replace face_matcher.py with InsightFace (see section 3)
-
-# 3. Optionally replace person_detector.py with YOLO (see section 2)
-
-# 4. Configure .env
-SAM_DEVICE=cpu          # or cuda if you have GPU
-OBSTACLE_DETECTION_ENABLED=false
-REKOGNITION_SIMILARITY_THRESHOLD=70.0   # lower for local models
-
-# 5. Start server
-python main.py
+### Detect-only mode (`_process_detect_only`)
+```
+1. Skip unless Nth frame (every 10th, configurable)
+2. Run YOLOv8 on frame -> person detections (in thread executor)
+3. If reference photo available:
+   a. Crop each detection
+   b. compare_face(reference, crop) -> confidence
+   c. Mark as matched if above threshold
+4. Cache results for intermediate frames
 ```
 
 ---
 
 ## Performance Notes
 
-- **SAM on CPU** takes ~2-4s per frame. On CUDA it's ~200ms. Consider FastSAM (~30ms) if latency matters.
-- **YOLO person detection** is ~10ms on GPU, ~50ms on CPU — much faster than SAM + heuristic filtering.
-- If you replace person detection with YOLO, you can skip SAM during `IDENTIFICATION` and `APPROACH` entirely for major speedup.
-- The frame pipeline runs synchronously per frame. At 10 fps input, you have ~100ms budget per frame for all inference.
-- SAM inference runs in a thread executor (`run_in_executor`) to avoid blocking the async event loop.
+- **YOLOv8 nano** is ~20-50ms on CPU, ~5-10ms on GPU
+- **AWS Rekognition** adds ~200-500ms per API call (network latency)
+- Dashboard detect mode runs every 10th frame (~1 detect/sec at 10fps input) to preserve stream FPS
+- All inference runs in thread executors (`run_in_executor`) to avoid blocking the async event loop
+- At 10fps input, mission states (IDENTIFICATION/APPROACH) have ~100ms budget per frame for YOLO; Rekognition runs async per detection
