@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Drone Control</string>
+    <string name="accessibility_service_description">Drone Control touch injection service for controlling drone flight apps via virtual joystick gestures.</string>
+</resources>

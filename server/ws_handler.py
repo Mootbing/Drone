@@ -1,0 +1,326 @@
+"""WebSocket connection manager for phone ↔ PC communication."""
+
+import asyncio
+import base64
+import json
+import logging
+import time
+from typing import Optional
+
+import numpy as np
+from fastapi import WebSocket, WebSocketDisconnect
+
+from config import IDENTIFICATION_RANGE_M, WAYPOINT_REACHED_RADIUS_M
+from state_machine import StateMachine, DroneState
+from navigation.geocoder import geocode_address
+from navigation.router import get_route_waypoints
+from navigation.commander import compute_navigation_command
+from navigation.obstacle_avoidance import detect_obstacles
+from identification.person_detector import detect_persons
+from identification.face_matcher import compare_face
+from identification.approach import compute_approach_command
+from models.sam_loader import SAMInference
+
+logger = logging.getLogger(__name__)
+
+
+def _haversine_m(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
+    """Haversine distance in meters between two GPS coordinates."""
+    import math
+    R = 6_371_000
+    dlat = math.radians(lat2 - lat1)
+    dlng = math.radians(lng2 - lng1)
+    a = (math.sin(dlat / 2) ** 2 +
+         math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) *
+         math.sin(dlng / 2) ** 2)
+    return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+
+class ConnectionManager:
+    """Manages a single phone WebSocket connection and processes frames."""
+
+    def __init__(self, sam: SAMInference):
+        self.ws: Optional[WebSocket] = None
+        self.sm = StateMachine()
+        self.sam = sam
+        self._last_heartbeat = 0.0
+
+    async def connect(self, websocket: WebSocket):
+        await websocket.accept()
+        self.ws = websocket
+        logger.info("Phone connected")
+
+    async def disconnect(self):
+        self.ws = None
+        logger.info("Phone disconnected")
+
+    async def send_json(self, data: dict):
+        if self.ws:
+            await self.ws.send_json(data)
+
+    async def send_command(self, direction: str, intensity: float, duration_ms: int = 500):
+        await self.send_json({
+            "type": "command",
+            "action": "move",
+            "direction": direction,
+            "intensity": intensity,
+            "duration_ms": duration_ms,
+        })
+
+    async def send_mode_change(self, mode: str, message: str):
+        await self.send_json({
+            "type": "mode_change",
+            "mode": mode,
+            "message": message,
+        })
+
+    async def send_hover(self):
+        await self.send_json({
+            "type": "command",
+            "action": "hover",
+            "direction": "none",
+            "intensity": 0.0,
+            "duration_ms": 0,
+        })
+
+    # --- Message routing ---
+
+    async def handle_message(self, raw: str):
+        """Route incoming JSON message from phone."""
+        try:
+            msg = json.loads(raw)
+        except json.JSONDecodeError:
+            logger.error("Invalid JSON from phone")
+            return
+
+        msg_type = msg.get("type")
+        if msg_type == "frame":
+            await self._handle_frame(msg)
+        elif msg_type == "status":
+            self._handle_status(msg)
+        elif msg_type == "mission_input":
+            await self._handle_mission_input(msg)
+        elif msg_type == "abort":
+            await self._handle_abort()
+        elif msg_type == "delivery_confirmed":
+            self._handle_delivery_confirmed()
+        elif msg_type == "ping":
+            await self.send_json({"type": "pong", "timestamp": time.time()})
+        else:
+            logger.warning("Unknown message type: %s", msg_type)
+
+    # --- Handlers ---
+
+    async def _handle_mission_input(self, msg: dict):
+        """Process mission start: address + reference photo + delivery message."""
+        address = msg.get("address", "")
+        reference_b64 = msg.get("reference_photo", "")
+        delivery_message = msg.get("delivery_message", "")
+
+        # Geocode address
+        result = geocode_address(address)
+        if result is None:
+            await self.send_json({
+                "type": "error",
+                "message": f"Could not geocode address: {address}",
+            })
+            return
+
+        lat, lng = result
+        reference_bytes = base64.b64decode(reference_b64) if reference_b64 else None
+
+        self.sm.set_target(address, lat, lng, reference_bytes, delivery_message)
+
+        # Get route
+        if msg.get("gps"):
+            start_lat = msg["gps"]["lat"]
+            start_lng = msg["gps"]["lng"]
+        else:
+            start_lat, start_lng = lat, lng  # fallback
+
+        waypoints = get_route_waypoints(start_lat, start_lng, lat, lng)
+        self.sm.set_route(waypoints)
+
+        # Transition to navigation
+        self.sm.transition(DroneState.NAVIGATION)
+        await self.send_mode_change("navigation",
+                                    f"Route planned: {len(waypoints)} waypoints to {address}")
+
+    async def _handle_frame(self, msg: dict):
+        """Process a video frame based on current state."""
+        # Update GPS
+        gps = msg.get("gps", {})
+        if gps:
+            self.sm.update_position(
+                gps.get("lat", 0), gps.get("lng", 0), gps.get("alt", 0)
+            )
+
+        # Decode frame
+        frame_b64 = msg.get("frame", "")
+        if not frame_b64:
+            return
+
+        frame_bytes = base64.b64decode(frame_b64)
+        frame_arr = _decode_jpeg(frame_bytes)
+        if frame_arr is None:
+            return
+
+        state = self.sm.state
+
+        if state == DroneState.NAVIGATION:
+            await self._process_navigation(frame_arr)
+        elif state == DroneState.IDENTIFICATION:
+            await self._process_identification(frame_arr)
+        elif state == DroneState.APPROACH:
+            await self._process_approach(frame_arr)
+        # Other states: no frame processing needed
+
+    async def _process_navigation(self, frame: np.ndarray):
+        """Navigation mode: follow waypoints + obstacle avoidance."""
+        ctx = self.sm.context
+
+        # Check if we've reached the destination zone
+        dist = _haversine_m(ctx.current_lat, ctx.current_lng,
+                            ctx.target_lat, ctx.target_lng)
+        if dist < IDENTIFICATION_RANGE_M:
+            self.sm.transition(DroneState.IDENTIFICATION)
+            await self.send_mode_change("identification",
+                                        "Arrived at target zone, scanning for people...")
+            return
+
+        # Advance waypoint if close enough
+        if ctx.current_waypoint_idx < len(ctx.waypoints):
+            wp = ctx.waypoints[ctx.current_waypoint_idx]
+            wp_dist = _haversine_m(ctx.current_lat, ctx.current_lng,
+                                   wp["lat"], wp["lng"])
+            if wp_dist < WAYPOINT_REACHED_RADIUS_M:
+                ctx.current_waypoint_idx += 1
+                logger.info("Reached waypoint %d/%d",
+                            ctx.current_waypoint_idx, len(ctx.waypoints))
+
+        # Check obstacles via SAM
+        masks = self.sam.generate_masks(frame)
+        obstacle_cmd = detect_obstacles(frame, masks)
+
+        if obstacle_cmd:
+            # Obstacle avoidance takes priority
+            await self.send_command(
+                obstacle_cmd["direction"],
+                obstacle_cmd["intensity"],
+                obstacle_cmd.get("duration_ms", 500),
+            )
+        else:
+            # Follow route
+            if ctx.current_waypoint_idx < len(ctx.waypoints):
+                wp = ctx.waypoints[ctx.current_waypoint_idx]
+                cmd = compute_navigation_command(
+                    ctx.current_lat, ctx.current_lng,
+                    wp["lat"], wp["lng"],
+                )
+                await self.send_command(cmd["direction"], cmd["intensity"])
+            else:
+                # Past last waypoint, head to target
+                cmd = compute_navigation_command(
+                    ctx.current_lat, ctx.current_lng,
+                    ctx.target_lat, ctx.target_lng,
+                )
+                await self.send_command(cmd["direction"], cmd["intensity"])
+
+    async def _process_identification(self, frame: np.ndarray):
+        """Identification mode: find and match target person."""
+        ctx = self.sm.context
+        masks = self.sam.generate_masks(frame)
+        persons = detect_persons(frame, masks)
+
+        if not persons:
+            # Rotate slowly to scan
+            await self.send_command("rotate_cw", 0.3, 800)
+            return
+
+        # Try matching each detected person
+        for person in persons:
+            bbox = person["bbox"]
+            face_crop = frame[bbox[1]:bbox[3], bbox[0]:bbox[2]]
+
+            if ctx.reference_photo_bytes is None:
+                continue
+
+            match_result = compare_face(ctx.reference_photo_bytes, face_crop)
+            if match_result and match_result["confidence"] >= 90.0:
+                ctx.target_bbox = bbox
+                ctx.match_confidence = match_result["confidence"]
+                self.sm.transition(DroneState.APPROACH)
+                await self.send_json({
+                    "type": "identified",
+                    "match": True,
+                    "confidence": match_result["confidence"],
+                    "person_bbox": bbox,
+                    "action": "approach",
+                })
+                await self.send_mode_change("approach",
+                                            f"Target identified ({match_result['confidence']:.0f}% confidence). Approaching...")
+                return
+
+        # No match found yet, keep scanning
+        await self.send_command("rotate_cw", 0.2, 600)
+
+    async def _process_approach(self, frame: np.ndarray):
+        """Approach mode: fly toward identified person."""
+        ctx = self.sm.context
+        masks = self.sam.generate_masks(frame)
+        persons = detect_persons(frame, masks)
+
+        # Re-match to track the person
+        best_bbox = None
+        best_conf = 0.0
+        for person in persons:
+            bbox = person["bbox"]
+            face_crop = frame[bbox[1]:bbox[3], bbox[0]:bbox[2]]
+            if ctx.reference_photo_bytes is None:
+                continue
+            match_result = compare_face(ctx.reference_photo_bytes, face_crop)
+            if match_result and match_result["confidence"] > best_conf:
+                best_conf = match_result["confidence"]
+                best_bbox = bbox
+
+        if best_bbox is None:
+            # Lost track, go back to identification
+            self.sm.transition(DroneState.IDENTIFICATION)
+            await self.send_mode_change("identification",
+                                        "Lost visual on target, rescanning...")
+            return
+
+        cmd = compute_approach_command(best_bbox, frame.shape[1], frame.shape[0])
+        if cmd.get("arrived"):
+            self.sm.transition(DroneState.DELIVERY)
+            await self.send_mode_change("delivery", ctx.delivery_message)
+            await self.send_hover()
+        else:
+            await self.send_command(cmd["direction"], cmd["intensity"], cmd.get("duration_ms", 500))
+
+    def _handle_status(self, msg: dict):
+        """Log phone status updates."""
+        logger.info("Phone status: battery=%s signal=%s mode=%s",
+                    msg.get("battery"), msg.get("signal"), msg.get("mode"))
+
+    async def _handle_abort(self):
+        """Handle abort command."""
+        self.sm.abort()
+        await self.send_hover()
+        await self.send_mode_change("hover", "Mission aborted — drone hovering.")
+
+    def _handle_delivery_confirmed(self):
+        """Handle delivery confirmation from phone."""
+        self.sm.transition(DroneState.DONE)
+        logger.info("Delivery confirmed. Mission complete.")
+
+
+def _decode_jpeg(data: bytes) -> Optional[np.ndarray]:
+    """Decode JPEG bytes to numpy array (BGR)."""
+    try:
+        import cv2
+        arr = np.frombuffer(data, dtype=np.uint8)
+        return cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    except Exception:
+        logger.exception("Failed to decode JPEG frame")
+        return None
