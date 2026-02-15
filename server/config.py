@@ -18,14 +18,9 @@ AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID", "")
 AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY", "")
 REKOGNITION_SIMILARITY_THRESHOLD = float(os.getenv("REKOGNITION_SIMILARITY_THRESHOLD", "90.0"))
 
-# --- SAM Model ---
-SAM_MODEL_TYPE = os.getenv("SAM_MODEL_TYPE", "vit_b")
-SAM_CHECKPOINT_PATH = os.getenv("SAM_CHECKPOINT_PATH", "models/sam_vit_b_01ec64.pth")
-SAM_DEVICE = os.getenv("SAM_DEVICE", "cuda")  # "cuda" or "cpu"
+# --- Person Detection (YOLOv8) ---
+PERSON_CONFIDENCE_THRESHOLD = float(os.getenv("PERSON_CONFIDENCE_THRESHOLD", "0.4"))
 
 # --- Navigation ---
 WAYPOINT_REACHED_RADIUS_M = float(os.getenv("WAYPOINT_REACHED_RADIUS_M", "10.0"))
 IDENTIFICATION_RANGE_M = float(os.getenv("IDENTIFICATION_RANGE_M", "50.0"))
-OBSTACLE_DETECTION_ENABLED = os.getenv("OBSTACLE_DETECTION_ENABLED", "false").lower() == "true"
-OBSTACLE_CENTER_THRESHOLD = 0.3  # fraction of frame center considered "in path"
-OBSTACLE_MIN_AREA_FRACTION = 0.05  # minimum segment area to count as obstacle

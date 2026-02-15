@@ -33,13 +33,14 @@ export default function App() {
           name="Input"
           component={InputScreen}
           options={({ navigation }) => ({
-            title: '',
+            title: 'SkyHeart',
+            headerTitleStyle: { color: '#fff', fontSize: 18, fontWeight: 'bold' },
             headerRight: () => (
               <TouchableOpacity
                 onPress={() => navigation.navigate('Settings')}
                 style={{ paddingHorizontal: 4, paddingVertical: 6 }}
               >
-                <Text style={{ color: '#888', fontSize: 14, fontWeight: '600' }}>Settings</Text>
+                <Text style={{ color: '#888', fontSize: 20 }}>{'\u2699'}</Text>
               </TouchableOpacity>
             ),
           })}

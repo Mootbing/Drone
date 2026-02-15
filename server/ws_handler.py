@@ -11,17 +11,16 @@ import cv2
 import numpy as np
 from fastapi import WebSocket
 
-from config import IDENTIFICATION_RANGE_M, WAYPOINT_REACHED_RADIUS_M, REKOGNITION_SIMILARITY_THRESHOLD, OBSTACLE_DETECTION_ENABLED
+from config import IDENTIFICATION_RANGE_M, WAYPOINT_REACHED_RADIUS_M, REKOGNITION_SIMILARITY_THRESHOLD
 from state_machine import StateMachine, DroneState
 from navigation.geocoder import geocode_address
 from navigation.router import get_route_waypoints
 from navigation.commander import compute_navigation_command
 from navigation.obstacle_avoidance import detect_obstacles
-from identification.person_detector import detect_persons
+from identification.person_detector import PersonDetector
 from identification.face_matcher import compare_face
 from identification.approach import compute_approach_command
 from navigation.geo_utils import haversine_m
-from models.sam_loader import SAMInference
 
 logger = logging.getLogger(__name__)
 
@@ -29,10 +28,11 @@ logger = logging.getLogger(__name__)
 class ConnectionManager:
     """Manages a single phone WebSocket connection and processes frames."""
 
-    def __init__(self, sam: SAMInference):
+    def __init__(self):
         self.ws: Optional[WebSocket] = None
         self.sm = StateMachine()
-        self.sam = sam
+        self.person_detector = PersonDetector()
+        self.detect_enabled: bool = False
         # Dashboard viewers
         self.dashboard_clients: List[WebSocket] = []
         self.latest_frame_b64: Optional[str] = None
@@ -123,6 +123,7 @@ class ConnectionManager:
             "frame_count": self.frame_count,
             "waypoint": f"{ctx.current_waypoint_idx}/{len(ctx.waypoints)}" if ctx.waypoints else "—",
             "target_address": ctx.target_address,
+            "detect_enabled": self.detect_enabled,
         })
         stale = []
         for client in self.dashboard_clients:
@@ -266,7 +267,8 @@ class ConnectionManager:
             detections = await self._process_identification(frame_arr)
         elif state == DroneState.APPROACH:
             detections = await self._process_approach(frame_arr)
-        # Other states: no frame processing needed
+        elif self.detect_enabled:
+            detections = await self._process_detect_only(frame_arr)
 
         self.latest_detections = detections
         await self._broadcast_dashboard(frame_b64, detections)
@@ -294,13 +296,8 @@ class ConnectionManager:
                 logger.info("Reached waypoint %d/%d",
                             ctx.current_waypoint_idx, len(ctx.waypoints))
 
-        # Obstacle detection (disabled by default — skips SAM to save compute)
-        obstacle_cmd = None
-        if OBSTACLE_DETECTION_ENABLED:
-            masks = await asyncio.get_event_loop().run_in_executor(
-                None, self.sam.generate_masks, frame
-            )
-            obstacle_cmd = detect_obstacles(frame, masks)
+        # Obstacle detection (stub — always returns None)
+        obstacle_cmd = detect_obstacles(frame)
 
         if obstacle_cmd:
             # Obstacle avoidance takes priority — optionally reroute
@@ -357,10 +354,9 @@ class ConnectionManager:
         """Identification mode: find and match target person."""
         ctx = self.sm.context
         detections = []
-        masks = await asyncio.get_event_loop().run_in_executor(
-            None, self.sam.generate_masks, frame
+        persons = await asyncio.get_event_loop().run_in_executor(
+            None, self.person_detector.detect, frame
         )
-        persons = detect_persons(frame, masks)
 
         if not persons:
             # Rotate slowly to scan
@@ -406,10 +402,9 @@ class ConnectionManager:
         """Approach mode: fly toward identified person."""
         ctx = self.sm.context
         detections = []
-        masks = await asyncio.get_event_loop().run_in_executor(
-            None, self.sam.generate_masks, frame
+        persons = await asyncio.get_event_loop().run_in_executor(
+            None, self.person_detector.detect, frame
         )
-        persons = detect_persons(frame, masks)
 
         # Re-match to track the person
         best_bbox = None
@@ -445,6 +440,27 @@ class ConnectionManager:
         else:
             await self.send_command(cmd["direction"], cmd["intensity"], cmd.get("duration_ms", 500))
         return detections
+
+    async def _process_detect_only(self, frame: np.ndarray) -> list:
+        """Run person detection without face matching or navigation commands."""
+        persons = await asyncio.get_event_loop().run_in_executor(
+            None, self.person_detector.detect, frame
+        )
+        return [
+            {"bbox": p["bbox"], "type": "person", "matched": False,
+             "confidence": round(p["confidence"] * 100, 1)}
+            for p in persons
+        ]
+
+    async def handle_dashboard_message(self, raw: str):
+        """Handle incoming messages from dashboard clients."""
+        try:
+            msg = json.loads(raw)
+        except json.JSONDecodeError:
+            return
+        if msg.get("type") == "toggle_detect":
+            self.detect_enabled = not self.detect_enabled
+            logger.info("Detection toggle: %s", "ON" if self.detect_enabled else "OFF")
 
     def _handle_status(self, msg: dict):
         """Log phone status updates."""

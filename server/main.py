@@ -1,6 +1,5 @@
 """FastAPI entry point for the drone control server."""
 
-import asyncio
 import logging
 from contextlib import asynccontextmanager
 
@@ -11,7 +10,6 @@ from fastapi.responses import HTMLResponse, Response
 
 from config import WS_HOST, WS_PORT
 from ws_handler import ConnectionManager
-from models.sam_loader import SAMInference
 
 logging.basicConfig(
     level=logging.INFO,
@@ -19,16 +17,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# SAM model and connection manager (initialized in lifespan)
-sam = SAMInference()
-manager = ConnectionManager(sam)
+manager = ConnectionManager()
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Drone Control Server starting on %s:%d", WS_HOST, WS_PORT)
-    loop = asyncio.get_event_loop()
-    await loop.run_in_executor(None, sam.load)
     yield
 
 
@@ -100,7 +94,8 @@ async def dashboard_ws(websocket: WebSocket):
     await manager.dashboard_connect(websocket)
     try:
         while True:
-            await websocket.receive_text()  # keep-alive / ignore input
+            data = await websocket.receive_text()
+            await manager.handle_dashboard_message(data)
     except WebSocketDisconnect:
         await manager.dashboard_disconnect(websocket)
     except Exception:
@@ -153,6 +148,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   .controls { padding: 16px; }
   .controls button { background: #222; color: #ccc; border: 1px solid #333; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-size: 13px; margin-right: 8px; }
   .controls button:hover { background: #333; }
+  .toggle-btn { width: 100%; padding: 10px 16px; border-radius: 6px; border: 1px solid #333; cursor: pointer; font-size: 13px; font-weight: 600; transition: all 0.15s; }
+  .toggle-off { background: #1a1a2a; color: #888; }
+  .toggle-on { background: #1a3a1a; color: #2ecc71; border-color: #2ecc71; }
   .log-area { font-family: monospace; font-size: 12px; color: #888; max-height: 180px; overflow-y: auto; padding: 8px; background: #0a0a0a; border-radius: 6px; }
   .log-area div { padding: 1px 0; }
   .log-area .log-frame { color: #555; }
@@ -179,6 +177,10 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <div style="margin-bottom:8px"><span class="state-badge state-input" id="stateBadge">INPUT</span></div>
       <div class="stat-row"><span class="stat-label">Target</span><span class="stat-value" id="targetAddr">—</span></div>
       <div class="stat-row"><span class="stat-label">Waypoint</span><span class="stat-value" id="waypoint">—</span></div>
+    </div>
+    <div class="panel">
+      <div class="panel-title">Detection</div>
+      <button class="toggle-btn toggle-off" id="detectBtn" onclick="toggleDetect()">Detect: OFF</button>
     </div>
     <div class="panel">
       <div class="panel-title">Stream</div>
@@ -305,6 +307,7 @@ function updateMeta(msg) {
 
   document.getElementById('waypoint').textContent = msg.waypoint;
   document.getElementById('targetAddr').textContent = msg.target_address || '—';
+  updateDetectBtn(msg.detect_enabled);
 
   const detList = document.getElementById('detList');
   if (msg.detections && msg.detections.length > 0) {
@@ -339,6 +342,23 @@ setInterval(() => {
     document.getElementById('connText').textContent = 'No frames';
   }
 }, 1000);
+
+function toggleDetect() {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: 'toggle_detect' }));
+  }
+}
+
+function updateDetectBtn(enabled) {
+  const btn = document.getElementById('detectBtn');
+  if (enabled) {
+    btn.textContent = 'Detect: ON';
+    btn.className = 'toggle-btn toggle-on';
+  } else {
+    btn.textContent = 'Detect: OFF';
+    btn.className = 'toggle-btn toggle-off';
+  }
+}
 
 connect();
 </script>
