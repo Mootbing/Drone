@@ -231,13 +231,7 @@ class ConnectionManager:
                                     f"Route planned: {len(waypoints)} waypoints to {address}")
 
     async def _handle_frame(self, msg: dict):
-        """Process a video frame based on current state.
-
-        Frame processing (YOLO, Rekognition) is dispatched as a background
-        task so the WebSocket receive loop stays responsive to pings.
-        If a previous frame is still being processed, we skip heavy work
-        but still forward the raw frame to the dashboard.
-        """
+        """Process a video frame based on current state."""
         # Update GPS
         gps = msg.get("gps", {})
         if gps:
@@ -263,46 +257,29 @@ class ConnectionManager:
         # Store for dashboard
         self.latest_frame_b64 = frame_b64
 
-        # Always broadcast raw frame to dashboard (cheap)
-        await self._broadcast_dashboard(frame_b64, self.latest_detections)
-
-        # Skip heavy processing if previous frame still running
-        if self._processing_frame:
+        try:
+            frame_bytes = base64.b64decode(frame_b64)
+        except Exception:
+            logger.warning("Invalid base64 frame data")
+            return
+        frame_arr = _decode_jpeg(frame_bytes)
+        if frame_arr is None:
             return
 
-        # Fire-and-forget the heavy work
-        asyncio.create_task(self._process_frame_bg(frame_b64))
+        state = self.sm.state
+        detections: list = []
 
-    async def _process_frame_bg(self, frame_b64: str):
-        """Background task for CPU/network-heavy frame processing."""
-        self._processing_frame = True
-        try:
-            try:
-                frame_bytes = base64.b64decode(frame_b64)
-            except Exception:
-                logger.warning("Invalid base64 frame data")
-                return
-            frame_arr = _decode_jpeg(frame_bytes)
-            if frame_arr is None:
-                return
+        if state == DroneState.NAVIGATION:
+            await self._process_navigation(frame_arr)
+        elif state == DroneState.IDENTIFICATION:
+            detections = await self._process_identification(frame_arr)
+        elif state == DroneState.APPROACH:
+            detections = await self._process_approach(frame_arr)
+        elif self.detect_enabled:
+            detections = await self._process_detect_only(frame_arr)
 
-            state = self.sm.state
-            detections: list = []
-
-            if state == DroneState.NAVIGATION:
-                await self._process_navigation(frame_arr)
-            elif state == DroneState.IDENTIFICATION:
-                detections = await self._process_identification(frame_arr)
-            elif state == DroneState.APPROACH:
-                detections = await self._process_approach(frame_arr)
-            elif self.detect_enabled:
-                detections = await self._process_detect_only(frame_arr)
-
-            self.latest_detections = detections
-        except Exception:
-            logger.exception("Error processing frame")
-        finally:
-            self._processing_frame = False
+        self.latest_detections = detections
+        await self._broadcast_dashboard(frame_b64, detections)
 
     async def _process_navigation(self, frame: np.ndarray):
         """Navigation mode: follow waypoints, with optional obstacle avoidance."""

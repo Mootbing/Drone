@@ -74,17 +74,44 @@ async def map_tile(z: int, x: int, y: int):
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
+    import asyncio
+
     connected = await manager.connect(websocket)
     if not connected:
         return
-    try:
+
+    queue: asyncio.Queue = asyncio.Queue(maxsize=2)
+
+    async def reader():
+        """Read messages as fast as possible so the WS stays healthy."""
+        try:
+            while True:
+                data = await websocket.receive_text()
+                # Drop old frames if consumer is slow — keep only latest
+                if queue.full():
+                    try:
+                        queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        pass
+                await queue.put(data)
+        except WebSocketDisconnect:
+            await queue.put(None)
+        except Exception:
+            await queue.put(None)
+
+    async def processor():
+        """Process messages from queue — heavy work happens here."""
         while True:
-            data = await websocket.receive_text()
+            data = await queue.get()
+            if data is None:
+                break
             await manager.handle_message(data)
-    except WebSocketDisconnect:
-        await manager.disconnect()
-    except Exception:
-        logger.exception("WebSocket error")
+
+    reader_task = asyncio.create_task(reader())
+    try:
+        await processor()
+    finally:
+        reader_task.cancel()
         await manager.disconnect()
 
 
