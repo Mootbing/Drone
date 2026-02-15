@@ -3,10 +3,12 @@
  */
 
 import React, { useEffect, useState } from 'react';
-import { View, Text, StyleSheet } from 'react-native';
+import { View, Text, StyleSheet, NativeModules, Dimensions, Alert } from 'react-native';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import wsService from '../services/WebSocketService';
 import screenCapture from '../services/ScreenCapture';
+import { launchDroneApp } from './SettingsScreen';
+import { getActionPoints } from './ActionRecorderScreen';
 
 type Props = {
   navigation: NativeStackNavigationProp<any>;
@@ -18,6 +20,44 @@ export default function WatchScreen({ navigation, route }: Props) {
 
   useEffect(() => {
     let frameUnsub: (() => void) | null = null;
+
+    const launchAndTap = async () => {
+      // Check accessibility service first
+      let serviceEnabled = false;
+      try {
+        serviceEnabled = await NativeModules.TouchInjectorModule.isServiceEnabled();
+      } catch {}
+
+      if (!serviceEnabled) {
+        Alert.alert(
+          'Accessibility Service Required',
+          'Enable "Drone Control" in Settings > Accessibility to allow automated taps.',
+          [
+            { text: 'Open Settings', onPress: () => NativeModules.TouchInjectorModule?.openAccessibilitySettings() },
+            { text: 'Skip', style: 'cancel' },
+          ],
+        );
+      }
+
+      launchDroneApp();
+
+      const takeoffPts = getActionPoints().takeoff;
+      if (takeoffPts && takeoffPts.length > 0 && serviceEnabled) {
+        const screen = Dimensions.get('screen');
+        setTimeout(async () => {
+          const pt = takeoffPts[0];
+          const absX = pt.rx * screen.width;
+          const absY = pt.ry * screen.height;
+          console.log(`[Takeoff] Tapping at (${absX}, ${absY}) screen=${screen.width}x${screen.height}`);
+          try {
+            await NativeModules.TouchInjectorModule.injectTap(absX, absY);
+            console.log('[Takeoff] Tap succeeded');
+          } catch (e: any) {
+            console.error('[Takeoff] Tap failed:', e?.message);
+          }
+        }, 3000);
+      }
+    };
 
     const startCapture = async () => {
       try {
@@ -37,6 +77,11 @@ export default function WatchScreen({ navigation, route }: Props) {
         });
 
         setStatus('Streaming live via USB.\nDo not unplug.');
+
+        // After capture confirmed, launch drone app and tap takeoff
+        if (!route.params?.testMode) {
+          launchAndTap();
+        }
       } catch (err) {
         setStatus('Screen capture failed');
         console.error('Screen capture error:', err);

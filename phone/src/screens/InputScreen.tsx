@@ -24,7 +24,7 @@ import Geolocation from '@react-native-community/geolocation';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { launchImageLibrary, launchCamera } from 'react-native-image-picker';
 import wsService from '../services/WebSocketService';
-import { getReferencePhoto, loadReferencePhoto, setGlobalReferencePhoto, launchDroneApp } from './SettingsScreen';
+import { getReferencePhoto, loadReferencePhoto, setGlobalReferencePhoto } from './SettingsScreen';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 type GeoResult = {
@@ -409,9 +409,6 @@ export default function InputScreen({ navigation }: Props) {
       gps: userLocation ? { lat: userLocation.lat, lng: userLocation.lng, alt: 0 } : { lat: selectedCoords.lat, lng: selectedCoords.lng, alt: 0 },
       waypoints,
     });
-
-    // Open the selected drone app
-    launchDroneApp();
 
     navigation.navigate('Watch');
   }, [address, selectedCoords, referencePhoto, connected, navigation]);

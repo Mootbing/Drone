@@ -86,6 +86,8 @@ export default function SettingsScreen({ navigation, route }: Props) {
   const [droneAppPkg, setDroneAppPkg] = useState<string | null>(_droneAppPkg);
   const [droneAppName, setDroneAppName] = useState<string | null>(_droneAppName);
 
+  const [accessibilityEnabled, setAccessibilityEnabled] = useState(false);
+
   // App picker modal
   const [showAppPicker, setShowAppPicker] = useState(false);
   const [installedApps, setInstalledApps] = useState<AppInfo[]>([]);
@@ -98,6 +100,9 @@ export default function SettingsScreen({ navigation, route }: Props) {
       setDroneAppPkg(_droneAppPkg);
       setDroneAppName(_droneAppName);
     });
+    NativeModules.TouchInjectorModule?.isServiceEnabled()
+      .then((enabled: boolean) => setAccessibilityEnabled(enabled))
+      .catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -209,6 +214,72 @@ export default function SettingsScreen({ navigation, route }: Props) {
 
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.content}>
+      {/* Drone Controls */}
+      <Text style={styles.sectionTitle}>Drone Controls</Text>
+      <View style={styles.card}>
+        <View style={styles.serverRow}>
+          <View>
+            <Text style={styles.label}>Accessibility Service</Text>
+            <Text style={styles.hint}>Required for automated taps on drone app</Text>
+          </View>
+          <View style={styles.statusRow}>
+            <View style={[styles.statusDot, accessibilityEnabled ? styles.dotGreen : styles.dotRed]} />
+            <Text style={styles.statusText}>
+              {accessibilityEnabled ? 'Enabled' : 'Disabled'}
+            </Text>
+          </View>
+        </View>
+        {!accessibilityEnabled && (
+          <TouchableOpacity
+            style={[styles.connectBtn, { marginTop: 10 }]}
+            onPress={() => {
+              NativeModules.TouchInjectorModule?.openAccessibilitySettings();
+            }}
+          >
+            <Text style={styles.connectBtnText}>Open Accessibility Settings</Text>
+          </TouchableOpacity>
+        )}
+      </View>
+      <TouchableOpacity
+        style={[styles.card, { marginTop: 10 }]}
+        onPress={() => navigation.navigate('ActionRecorder')}
+      >
+        <View style={styles.serverRow}>
+          <View>
+            <Text style={styles.label}>Action Recorder</Text>
+            <Text style={styles.hint}>Record tap positions for Take Off/Landing, Route</Text>
+          </View>
+          <Text style={{ color: '#555', fontSize: 18 }}>&gt;</Text>
+        </View>
+      </TouchableOpacity>
+
+      {/* Reference Photo */}
+      <Text style={styles.sectionTitle}>Target Person</Text>
+      <View style={styles.card}>
+        <Text style={styles.label}>Reference Photo</Text>
+        <Text style={styles.hint}>Upload a photo of the person to identify</Text>
+        <View style={styles.photoRow}>
+          <TouchableOpacity style={styles.photoBtn} onPress={pickPhoto}>
+            <Text style={styles.photoBtnText}>Gallery</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.photoBtn} onPress={takePhoto}>
+            <Text style={styles.photoBtnText}>Camera</Text>
+          </TouchableOpacity>
+          {referencePhoto && (
+            <TouchableOpacity style={styles.photoBtnClear} onPress={clearPhoto}>
+              <Text style={styles.photoBtnClearText}>Clear</Text>
+            </TouchableOpacity>
+          )}
+        </View>
+        {referencePhoto && (
+          <Image
+            source={{ uri: `data:image/jpeg;base64,${referencePhoto}` }}
+            style={styles.preview}
+            resizeMode="cover"
+          />
+        )}
+      </View>
+
       {/* Server Connection */}
       <Text style={styles.sectionTitle}>Server</Text>
       <View style={styles.card}>
@@ -264,48 +335,6 @@ export default function SettingsScreen({ navigation, route }: Props) {
             </TouchableOpacity>
           )}
         </View>
-      </View>
-
-      {/* Action Recorder */}
-      <Text style={styles.sectionTitle}>Drone Controls</Text>
-      <TouchableOpacity
-        style={styles.card}
-        onPress={() => navigation.navigate('ActionRecorder')}
-      >
-        <View style={styles.serverRow}>
-          <View>
-            <Text style={styles.label}>Action Recorder</Text>
-            <Text style={styles.hint}>Record tap positions for Take Off/Landing, Route</Text>
-          </View>
-          <Text style={{ color: '#555', fontSize: 18 }}>&gt;</Text>
-        </View>
-      </TouchableOpacity>
-
-      {/* Reference Photo */}
-      <Text style={styles.sectionTitle}>Target Person</Text>
-      <View style={styles.card}>
-        <Text style={styles.label}>Reference Photo</Text>
-        <Text style={styles.hint}>Upload a photo of the person to identify</Text>
-        <View style={styles.photoRow}>
-          <TouchableOpacity style={styles.photoBtn} onPress={pickPhoto}>
-            <Text style={styles.photoBtnText}>Gallery</Text>
-          </TouchableOpacity>
-          <TouchableOpacity style={styles.photoBtn} onPress={takePhoto}>
-            <Text style={styles.photoBtnText}>Camera</Text>
-          </TouchableOpacity>
-          {referencePhoto && (
-            <TouchableOpacity style={styles.photoBtnClear} onPress={clearPhoto}>
-              <Text style={styles.photoBtnClearText}>Clear</Text>
-            </TouchableOpacity>
-          )}
-        </View>
-        {referencePhoto && (
-          <Image
-            source={{ uri: `data:image/jpeg;base64,${referencePhoto}` }}
-            style={styles.preview}
-            resizeMode="cover"
-          />
-        )}
       </View>
 
       {/* Diagnostics */}

@@ -205,9 +205,9 @@ export default function ActionRecorderScreen({ navigation }: Props) {
           )}
         </View>
 
-        <View style={fs.topLabel}>
+        <View style={fs.topLabel} pointerEvents="none">
           <Text style={[fs.topLabelText, { color: action.color }]}>
-            {pending ? `${stepText} — confirm position` : `Tap: ${stepText}`}
+            {pending ? 'Confirm?' : `Tap: ${stepText}`}
           </Text>
         </View>
 
@@ -370,7 +370,7 @@ const fs = StyleSheet.create({
   },
   topLabel: {
     position: 'absolute',
-    top: 50,
+    top: 12,
     left: 0,
     right: 0,
     alignItems: 'center',
@@ -407,7 +407,7 @@ const fs = StyleSheet.create({
   },
   bottomRow: {
     position: 'absolute',
-    bottom: 40,
+    bottom: 16,
     left: 32,
     right: 32,
     flexDirection: 'row',
@@ -440,7 +440,7 @@ const fs = StyleSheet.create({
   },
   cancelBtn: {
     position: 'absolute',
-    bottom: 40,
+    bottom: 16,
     alignSelf: 'center',
     backgroundColor: '#1a1a1a',
     paddingHorizontal: 32,
