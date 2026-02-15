@@ -5,7 +5,7 @@ import base64
 import json
 import logging
 import time
-from typing import Optional
+from typing import Optional, List
 
 import cv2
 import numpy as np
@@ -33,6 +33,14 @@ class ConnectionManager:
         self.ws: Optional[WebSocket] = None
         self.sm = StateMachine()
         self.sam = sam
+        # Dashboard viewers
+        self.dashboard_clients: List[WebSocket] = []
+        self.latest_frame_b64: Optional[str] = None
+        self.latest_detections: list = []
+        self.frame_count: int = 0
+        self.fps: float = 0.0
+        self._fps_ts: float = time.time()
+        self._fps_count: int = 0
 
     async def connect(self, websocket: WebSocket):
         if self.ws is not None:
@@ -76,6 +84,44 @@ class ConnectionManager:
             "intensity": 0.0,
             "duration_ms": 0,
         })
+
+    # --- Dashboard ---
+
+    async def dashboard_connect(self, ws: WebSocket):
+        await ws.accept()
+        self.dashboard_clients.append(ws)
+        logger.info("Dashboard client connected (%d total)", len(self.dashboard_clients))
+
+    async def dashboard_disconnect(self, ws: WebSocket):
+        if ws in self.dashboard_clients:
+            self.dashboard_clients.remove(ws)
+        logger.info("Dashboard client disconnected (%d remaining)", len(self.dashboard_clients))
+
+    async def _broadcast_dashboard(self, frame_b64: str, detections: list):
+        """Send frame + detections to all dashboard viewers."""
+        if not self.dashboard_clients:
+            return
+        ctx = self.sm.context
+        msg = json.dumps({
+            "type": "frame_update",
+            "frame": frame_b64,
+            "state": self.sm.state.value,
+            "detections": detections,
+            "gps": {"lat": ctx.current_lat, "lng": ctx.current_lng, "alt": ctx.current_alt},
+            "fps": round(self.fps, 1),
+            "frame_count": self.frame_count,
+            "waypoint": f"{ctx.current_waypoint_idx}/{len(ctx.waypoints)}" if ctx.waypoints else "—",
+            "target_address": ctx.target_address,
+        })
+        stale = []
+        for client in self.dashboard_clients:
+            try:
+                await client.send_text(msg)
+            except Exception:
+                stale.append(client)
+        for s in stale:
+            if s in self.dashboard_clients:
+                self.dashboard_clients.remove(s)
 
     # --- Message routing ---
 
@@ -172,6 +218,19 @@ class ConnectionManager:
         if not frame_b64:
             return
 
+        # Track FPS
+        self.frame_count += 1
+        self._fps_count += 1
+        now = time.time()
+        elapsed = now - self._fps_ts
+        if elapsed >= 1.0:
+            self.fps = self._fps_count / elapsed
+            self._fps_count = 0
+            self._fps_ts = now
+
+        # Store for dashboard
+        self.latest_frame_b64 = frame_b64
+
         try:
             frame_bytes = base64.b64decode(frame_b64)
         except Exception:
@@ -182,14 +241,18 @@ class ConnectionManager:
             return
 
         state = self.sm.state
+        detections: list = []
 
         if state == DroneState.NAVIGATION:
             await self._process_navigation(frame_arr)
         elif state == DroneState.IDENTIFICATION:
-            await self._process_identification(frame_arr)
+            detections = await self._process_identification(frame_arr)
         elif state == DroneState.APPROACH:
-            await self._process_approach(frame_arr)
+            detections = await self._process_approach(frame_arr)
         # Other states: no frame processing needed
+
+        self.latest_detections = detections
+        await self._broadcast_dashboard(frame_b64, detections)
 
     async def _process_navigation(self, frame: np.ndarray):
         """Navigation mode: follow waypoints, with optional obstacle avoidance."""
@@ -273,9 +336,10 @@ class ConnectionManager:
         except Exception:
             logger.exception("Reroute failed, continuing on current path")
 
-    async def _process_identification(self, frame: np.ndarray):
+    async def _process_identification(self, frame: np.ndarray) -> list:
         """Identification mode: find and match target person."""
         ctx = self.sm.context
+        detections = []
         masks = await asyncio.get_event_loop().run_in_executor(
             None, self.sam.generate_masks, frame
         )
@@ -284,18 +348,24 @@ class ConnectionManager:
         if not persons:
             # Rotate slowly to scan
             await self.send_command("rotate_cw", 0.3, 800)
-            return
+            return detections
 
         # Try matching each detected person
         for person in persons:
             bbox = person["bbox"]
             face_crop = frame[bbox[1]:bbox[3], bbox[0]:bbox[2]]
+            det = {"bbox": bbox, "type": "person", "matched": False, "confidence": 0}
 
             if ctx.reference_photo_bytes is None:
+                detections.append(det)
                 continue
 
             match_result = compare_face(ctx.reference_photo_bytes, face_crop)
+            if match_result:
+                det["confidence"] = match_result["confidence"]
             if match_result and match_result["confidence"] >= REKOGNITION_SIMILARITY_THRESHOLD:
+                det["matched"] = True
+                detections.append(det)
                 ctx.target_bbox = bbox
                 ctx.match_confidence = match_result["confidence"]
                 self.sm.transition(DroneState.APPROACH)
@@ -308,14 +378,17 @@ class ConnectionManager:
                 })
                 await self.send_mode_change("approach",
                                             f"Target identified ({match_result['confidence']:.0f}% confidence). Approaching...")
-                return
+                return detections
+            detections.append(det)
 
         # No match found yet, keep scanning
         await self.send_command("rotate_cw", 0.2, 600)
+        return detections
 
-    async def _process_approach(self, frame: np.ndarray):
+    async def _process_approach(self, frame: np.ndarray) -> list:
         """Approach mode: fly toward identified person."""
         ctx = self.sm.context
+        detections = []
         masks = await asyncio.get_event_loop().run_in_executor(
             None, self.sam.generate_masks, frame
         )
@@ -327,19 +400,25 @@ class ConnectionManager:
         for person in persons:
             bbox = person["bbox"]
             face_crop = frame[bbox[1]:bbox[3], bbox[0]:bbox[2]]
+            det = {"bbox": bbox, "type": "person", "matched": False, "confidence": 0}
             if ctx.reference_photo_bytes is None:
+                detections.append(det)
                 continue
             match_result = compare_face(ctx.reference_photo_bytes, face_crop)
-            if match_result and match_result["confidence"] > best_conf:
-                best_conf = match_result["confidence"]
-                best_bbox = bbox
+            if match_result:
+                det["confidence"] = match_result["confidence"]
+                if match_result["confidence"] > best_conf:
+                    best_conf = match_result["confidence"]
+                    best_bbox = bbox
+                    det["matched"] = True
+            detections.append(det)
 
         if best_bbox is None:
             # Lost track, go back to identification
             self.sm.transition(DroneState.IDENTIFICATION)
             await self.send_mode_change("identification",
                                         "Lost visual on target, rescanning...")
-            return
+            return detections
 
         cmd = compute_approach_command(best_bbox, frame.shape[1], frame.shape[0])
         if cmd.get("arrived"):
@@ -348,6 +427,7 @@ class ConnectionManager:
             await self.send_hover()
         else:
             await self.send_command(cmd["direction"], cmd["intensity"], cmd.get("duration_ms", 500))
+        return detections
 
     def _handle_status(self, msg: dict):
         """Log phone status updates."""

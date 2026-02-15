@@ -1,51 +1,60 @@
 # Drone Delivery & Identification System
 
-Autonomous drone delivery system that navigates street-level routes, identifies a target person using computer vision, and delivers a message. A phone captures the drone manufacturer's app screen and streams frames to a PC server for processing. The server runs SAM segmentation and Amazon Rekognition face matching, then sends movement commands back to the phone, which injects touch gestures into the drone app via Android's Accessibility Service.
+Autonomous drone delivery system that navigates street-level routes, identifies a target person using computer vision, and delivers a message. A phone captures the drone manufacturer's app screen and streams frames to a PC server over USB for processing. The server runs SAM segmentation and Amazon Rekognition face matching, then sends movement commands back to the phone, which injects touch gestures into the drone app via Android's Accessibility Service.
+
+All network traffic between the phone and server runs over USB via `adb reverse` port forwarding — the phone's WiFi stays connected to the drone.
 
 ---
 
 ## Architecture Overview
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│                         PHONE (Android)                             │
-│                                                                     │
-│  ┌──────────────┐    ┌──────────────────┐    ┌───────────────────┐  │
-│  │ React Native │    │ MediaProjection  │    │  Accessibility    │  │
-│  │   App UI     │───▶│ Screen Capture   │    │  Service (Touch)  │  │
-│  │              │    │ (1 fps, 720p)    │    │  Gesture Inject   │  │
-│  └──────┬───────┘    └────────┬─────────┘    └───────▲───────────┘  │
-│         │                     │                      │              │
-│         │              base64 JPEG frames      swipe gestures       │
-│         │                     │                      │              │
-│         └─────────┬───────────┘                      │              │
-│                   │ WebSocket (JSON)                  │              │
-│                   ▼                                   │              │
-└───────────────────┼───────────────────────────────────┼──────────────┘
+┌──────────────────────────────────────────────────────────────────────┐
+│                         PHONE (Android)                              │
+│                                                                      │
+│  ┌──────────────┐    ┌──────────────────┐    ┌───────────────────┐   │
+│  │ React Native │    │ MediaProjection  │    │  Accessibility    │   │
+│  │   App UI     │───▶│ Screen Capture   │    │  Service (Touch)  │   │
+│  │              │    │ (1 fps, 720p)    │    │  Gesture Inject   │   │
+│  └──────┬───────┘    └────────┬─────────┘    └───────▲───────────┘   │
+│         │                     │                      │               │
+│         │              base64 JPEG frames      swipe gestures        │
+│         │                     │                      │               │
+│         └─────────┬───────────┘                      │               │
+│                   │ WebSocket (JSON) via USB          │               │
+│                   ▼                                   │               │
+└───────────────────┼───────────────────────────────────┼───────────────┘
+                    │  USB (adb reverse)                │
+                    │  ws://localhost:8765/ws            │
                     │                                   │
-                    │  ws://server:8765/ws               │
-                    │                                   │
-┌───────────────────┼───────────────────────────────────┼──────────────┐
-│                   ▼            PC SERVER              │              │
-│  ┌──────────────────────────────────────────────────┐ │              │
-│  │              FastAPI + WebSocket                  │ │              │
-│  │                                                  │ │              │
-│  │  ┌─────────────┐  ┌──────────────┐  ┌─────────┐ │ │              │
-│  │  │   State     │  │  SAM ViT-B   │  │ Amazon  │ │ │              │
-│  │  │  Machine    │  │  Segment     │  │ Rekog-  │ │ │              │
-│  │  │             │  │  Anything    │  │ nition  │ │ │              │
-│  │  └─────────────┘  └──────────────┘  └─────────┘ │ │              │
-│  │                                                  │ │              │
-│  │  ┌─────────────┐  ┌──────────────┐  ┌─────────┐ │ │              │
-│  │  │  Google     │  │  Person      │  │ Approach│ │ │              │
-│  │  │  Maps API   │  │  Detector    │  │ Control │ │ │              │
-│  │  │  (Routes)   │  │  (Heuristic) │  │         │ │ │              │
-│  │  └─────────────┘  └──────────────┘  └─────────┘ │ │              │
-│  │                                                  │ │              │
-│  │            movement commands (JSON) ─────────────┼─┘              │
-│  └──────────────────────────────────────────────────┘                │
-└──────────────────────────────────────────────────────────────────────┘
+┌───────────────────┼───────────────────────────────────┼───────────────┐
+│                   ▼            PC SERVER              │               │
+│  ┌──────────────────────────────────────────────────┐ │               │
+│  │              FastAPI + WebSocket                  │ │               │
+│  │                                                  │ │               │
+│  │  ┌─────────────┐  ┌──────────────┐  ┌─────────┐ │ │               │
+│  │  │   State     │  │  SAM ViT-B   │  │ Amazon  │ │ │               │
+│  │  │  Machine    │  │  Segment     │  │ Rekog-  │ │ │               │
+│  │  │             │  │  Anything    │  │ nition  │ │ │               │
+│  │  └─────────────┘  └──────────────┘  └─────────┘ │ │               │
+│  │                                                  │ │               │
+│  │  ┌─────────────┐  ┌──────────────┐  ┌─────────┐ │ │               │
+│  │  │  HTTP Proxy │  │  Person      │  │ Approach│ │ │               │
+│  │  │ (Geocode,   │  │  Detector    │  │ Control │ │ │               │
+│  │  │  Route,Tile)│  │  (Heuristic) │  │         │ │ │               │
+│  │  └─────────────┘  └──────────────┘  └─────────┘ │ │               │
+│  │                                                  │ │               │
+│  │            movement commands (JSON) ─────────────┼─┘               │
+│  └──────────────────────────────────────────────────┘                 │
+└───────────────────────────────────────────────────────────────────────┘
 ```
+
+### Data Flow
+
+1. **Phone WiFi** → Drone (flight control)
+2. **Phone USB** → PC Server (frames, commands, geocoding, maps)
+3. `adb reverse tcp:8765 tcp:8765` tunnels server to `localhost:8765` on phone
+4. `adb reverse tcp:8081 tcp:8081` tunnels Metro bundler for dev
 
 ---
 
@@ -54,11 +63,13 @@ Autonomous drone delivery system that navigates street-level routes, identifies 
 ### 1. Mission Input
 
 The user opens the phone app and enters:
-- **Target address** (e.g., "123 Main St, New York, NY")
+- **Delivery address** — search via autocomplete (Nominatim) or drop a pin on the map
 - **Reference photo** of the target person (from camera or gallery)
-- **Delivery message** (text displayed when the drone reaches the person)
+- **Delivery message** (default: "moo")
 
-The phone sends this to the PC server, which geocodes the address via **Google Maps Geocoding API** and plans a street-level route via **Google Maps Directions API**. The route is decoded from Google's encoded polyline format into a sequence of GPS waypoints.
+The address is geocoded via **Nominatim** (free, no API key) through the server proxy. A street-level route is computed via **OSRM** and displayed on a **Leaflet/OpenStreetMap** map rendered in a WebView. The map shows the user's GPS location, the destination, and the driving route.
+
+A **map picker** modal lets the user tap to drop a pin, see the route drawn, and confirm — the server reverse-geocodes the pin coordinates back to an address.
 
 ### 2. Navigation
 
@@ -70,7 +81,7 @@ The drone follows the planned waypoints sequentially at altitude, staying above 
 
 **Waypoint advancement**: When the drone comes within `WAYPOINT_REACHED_RADIUS_M` (default 10m) of a waypoint, it advances to the next one. When within `IDENTIFICATION_RANGE_M` (default 50m) of the final destination, the system switches to identification mode.
 
-**Obstacle detection** is currently disabled by default (`OBSTACLE_DETECTION_ENABLED=false`). The drone flies its planned route without visual obstacle analysis. The obstacle detection interface is pluggable — see [Obstacle Detection](#obstacle-detection) below for how to add a backend.
+**Obstacle detection** is currently disabled by default (`OBSTACLE_DETECTION_ENABLED=false`). The obstacle detection interface is pluggable — see [Obstacle Detection](#obstacle-detection) below.
 
 ### 3. Identification
 
@@ -85,8 +96,6 @@ Once near the destination, the server uses **SAM (Segment Anything Model)** to s
 | Color variation | HSV hue std > 15 | People have varied colors (skin, clothing) |
 
 Each person candidate is cropped and sent to **Amazon Rekognition CompareFaces** to match against the reference photo. If similarity exceeds `REKOGNITION_SIMILARITY_THRESHOLD` (default 90%), the system transitions to approach mode.
-
-While scanning, the drone slowly rotates clockwise to survey the area.
 
 ### 4. Approach
 
@@ -128,13 +137,60 @@ INPUT ──▶ NAVIGATION ──▶ IDENTIFICATION ──▶ APPROACH ──▶
 | `DONE` | Mission complete | None |
 | `HOVER` | Emergency stop (abort) | None (hover) |
 
-Valid transitions are enforced by the state machine. Any active state can abort to `HOVER`. From `HOVER`, the mission can resume to `NAVIGATION` or `IDENTIFICATION`, or reset to `INPUT`.
+---
+
+## Phone App (React Native + Android Native)
+
+### Screens
+
+| Screen | Purpose |
+|--------|---------|
+| `InputScreen` | Server connection, address search/map picker, reference photo, delivery message, test mode |
+| `WatchScreen` | Main flight screen — starts capture, receives commands, shows overlay |
+| `DeliveryScreen` | Displays delivery message, confirm button |
+
+### Features
+
+- **Auto-connect** to WebSocket server on launch (`ws://localhost:8765/ws`)
+- **Server URL modal** — reconfigure connection via button
+- **Address autocomplete** — debounced Nominatim search through server proxy
+- **Map picker** — fullscreen modal with pin drop, user GPS marker, and route preview
+- **Route map** — Leaflet + OSM tiles rendered in WebView, shows driving route from user to destination
+- **Test mode** — "Test" button skips validation and goes straight to the Watch screen without screen capture
+- **Dark UI** — black background (#000), white buttons, dark inputs
+
+### Native Modules (Kotlin)
+
+**Screen Capture** (`ScreenCaptureModule` + `ScreenCaptureService`):
+- Uses Android **MediaProjection API** to capture the drone manufacturer's app screen
+- Runs as a foreground service with `mediaProjection` foreground service type
+- Captures at 1280x720, JPEG quality 70, ~1 frame per second
+- Emits `onFrameCaptured` events with base64 JPEG data
+
+**Touch Injection** (`DroneAccessibilityService` + `TouchInjectorModule`):
+- Uses Android **Accessibility Service** with `GestureDescription` API
+- Maps directional commands to swipe gestures on configurable joystick positions
+- Right joystick: forward/back/left/right (pitch & roll)
+- Left joystick: up/down (throttle), rotate_cw/rotate_ccw (yaw)
+- Intensity (0.0–1.0) scales swipe distance from joystick center
+
+### Server Proxy Endpoints
+
+Since the phone's WiFi is connected to the drone, all HTTP requests go through the server via USB:
+
+| Endpoint | Purpose |
+|----------|---------|
+| `GET /geocode?q=...` | Nominatim address search |
+| `GET /reverse-geocode?lat=...&lon=...` | Nominatim reverse geocoding |
+| `GET /route?from_lat=...&from_lng=...&to_lat=...&to_lng=...` | OSRM driving route |
+| `GET /tile/{z}/{x}/{y}.png` | OpenStreetMap tile proxy |
+| `GET /health` | Server health check |
 
 ---
 
 ## Communication Protocol
 
-All communication is over a single WebSocket connection (`ws://server:8765/ws`). Messages are JSON.
+All communication is over a single WebSocket connection (`ws://localhost:8765/ws`). Messages are JSON.
 
 ### Phone → PC
 
@@ -154,7 +210,7 @@ All communication is over a single WebSocket connection (`ws://server:8765/ws`).
   "type": "mission_input",
   "address": "123 Main St, New York, NY",
   "reference_photo": "<base64 JPEG>",
-  "delivery_message": "Package for you!",
+  "delivery_message": "moo",
   "gps": { "lat": 40.71, "lng": -74.00, "alt": 0 }
 }
 ```
@@ -202,38 +258,30 @@ Directions: `forward`, `back`, `left`, `right`, `up`, `down`, `rotate_cw`, `rota
 
 ## Obstacle Detection
 
-Obstacle detection is **disabled by default**. The drone flies its Google Maps route without visual obstacle analysis. This is intentional — the current placeholder (HSV sky-vs-not-sky color classifier) is not reliable enough for production.
+Obstacle detection is **disabled by default**. The drone flies its route without visual obstacle analysis.
 
 ### Enabling Obstacle Detection
 
 1. Set `OBSTACLE_DETECTION_ENABLED=true` in `.env`
-2. Register a detection backend in your code:
+2. Register a detection backend:
 
 ```python
 from navigation.obstacle_avoidance import register_backend
 
 def my_depth_detector(frame, masks):
     """Analyze frame for obstacles using depth estimation."""
-    # Your detection logic here (MiDaS, ZoeDepth, YOLO, etc.)
-    # Return None if path is clear
-    # Return avoidance command if obstacle detected:
     return {
-        "direction": "left",      # left, right, up
-        "intensity": 0.7,         # 0.0-1.0
+        "direction": "left",
+        "intensity": 0.7,
         "duration_ms": 600,
-        "reroute": True,          # optional: triggers Google Maps reroute
+        "reroute": True,
     }
 
 register_backend("depth", my_depth_detector)
 ```
 
-### Reroute on Obstacle
-
-When a detection backend returns `"reroute": True`, the server automatically replans the route from the drone's current GPS position to the destination via Google Maps Directions API. The remaining waypoints are replaced with the new route.
-
 ### Backend Interface
 
-A backend is any callable with signature:
 ```python
 def detector(frame: np.ndarray, masks: List[Dict]) -> Optional[Dict]
 ```
@@ -242,48 +290,6 @@ def detector(frame: np.ndarray, masks: List[Dict]) -> Optional[Dict]
 - `masks`: SAM segmentation masks (list of dicts with `segmentation`, `area`, `bbox`)
 - Returns: `None` if clear, or `{"direction": str, "intensity": float, "duration_ms": int}` to avoid
 
-### Recommended Detection Approaches
-
-| Approach | Pros | Cons |
-|----------|------|------|
-| **MiDaS / ZoeDepth** (monocular depth) | Real depth estimation, works at night | Slow on CPU, needs GPU |
-| **YOLO v8** (object detection) | Fast, identifies object types | Doesn't know distance |
-| **Stereo camera** (hardware) | True depth, very reliable | Requires camera hardware |
-| **LiDAR** (hardware) | Most reliable depth | Expensive, heavy for drone |
-
----
-
-## Phone App (React Native + Android Native)
-
-### Screens
-
-| Screen | Purpose |
-|--------|---------|
-| `InputScreen` | Server URL, address, reference photo, delivery message input |
-| `WatchScreen` | Main flight screen — starts capture, receives commands, shows overlay |
-| `DeliveryScreen` | Displays delivery message, confirm button |
-
-### Native Modules (Kotlin)
-
-**Screen Capture** (`ScreenCaptureModule` + `ScreenCaptureService`):
-- Uses Android **MediaProjection API** to capture the drone manufacturer's app screen
-- Runs as a foreground service with notification
-- Captures at 1280x720, JPEG quality 70, ~1 frame per second
-- Emits `onFrameCaptured` events with base64 JPEG data
-
-**Touch Injection** (`DroneAccessibilityService` + `TouchInjectorModule`):
-- Uses Android **Accessibility Service** with `GestureDescription` API
-- Maps directional commands to swipe gestures on configurable joystick positions
-- Right joystick: forward/back/left/right (pitch & roll)
-- Left joystick: up/down (throttle), rotate_cw/rotate_ccw (yaw)
-- Intensity (0.0–1.0) scales swipe distance from joystick center
-
-### UI Components
-
-- `NavigationOverlay`: Direction arrows, mode badge, confidence display
-- `StatusBar`: Connection status dot and message
-- `ManualControl`: Two touch pads for manual flight (fallback)
-
 ---
 
 ## Project Structure
@@ -291,7 +297,7 @@ def detector(frame: np.ndarray, masks: List[Dict]) -> Optional[Dict]
 ```
 Drone/
 ├── server/                              # PC backend (Python/FastAPI)
-│   ├── main.py                          # FastAPI app, WebSocket endpoint, SAM loading
+│   ├── main.py                          # FastAPI app, WebSocket, HTTP proxy endpoints
 │   ├── config.py                        # Environment config (.env), constants
 │   ├── ws_handler.py                    # WebSocket connection manager, message routing
 │   ├── state_machine.py                 # Mission state machine (7 states)
@@ -319,13 +325,15 @@ Drone/
 │
 ├── phone/                               # Android app (React Native + Kotlin)
 │   ├── App.tsx                          # Navigation root (3 screens)
+│   ├── index.js                         # React Native entry point
+│   ├── metro.config.js                  # Metro bundler config
 │   ├── src/
 │   │   ├── screens/
-│   │   │   ├── InputScreen.tsx          # Mission setup UI
-│   │   │   ├── WatchScreen.tsx          # Flight control + overlay
+│   │   │   ├── InputScreen.tsx          # Mission setup UI + map + address search
+│   │   │   ├── WatchScreen.tsx          # Flight control + overlay + test mode
 │   │   │   └── DeliveryScreen.tsx       # Delivery confirmation
 │   │   ├── services/
-│   │   │   ├── WebSocketService.ts      # WebSocket client (singleton, reconnect)
+│   │   │   ├── WebSocketService.ts      # WebSocket client (singleton, reconnect, heartbeat)
 │   │   │   ├── ScreenCapture.ts         # Bridge to native MediaProjection
 │   │   │   └── DroneControl.ts          # Bridge to native Accessibility Service
 │   │   ├── components/
@@ -355,16 +363,19 @@ Drone/
 
 - Python 3.10+
 - Node.js 18+
-- Android device (MediaProjection + Accessibility Service are Android-only)
+- Android device with USB debugging enabled
 - NVIDIA GPU recommended for SAM inference (CPU works but slower)
+- WSL2 or Linux (Windows adb.exe used for USB device communication)
 
-### Cloud Services Required
+### Cloud Services
 
-| Service | Purpose | Setup |
-|---------|---------|-------|
-| **Google Maps Platform** | Geocoding API + Directions API | [console.cloud.google.com](https://console.cloud.google.com/apis/credentials) — enable both APIs |
-| **AWS Rekognition** | Face comparison (CompareFaces) | [IAM console](https://console.aws.amazon.com/iam) — create user with `AmazonRekognitionFullAccess` |
-| **SAM Model** (local) | Image segmentation | Auto-downloaded at setup, runs locally |
+| Service | Purpose | Required? |
+|---------|---------|-----------|
+| **AWS Rekognition** | Face comparison (CompareFaces) | Yes (for identification) |
+| **SAM Model** (local) | Image segmentation | Yes (auto-downloaded) |
+| **Nominatim** | Address geocoding | Free, no key needed |
+| **OSRM** | Street routing | Free, no key needed |
+| **OpenStreetMap** | Map tiles | Free, no key needed |
 
 ### Server Setup
 
@@ -384,8 +395,8 @@ wget -O models/sam_vit_b_01ec64.pth \
   https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth
 
 # Configure environment
-cp .env.example .env  # or edit .env directly
-# Fill in: GOOGLE_MAPS_API_KEY, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY
+cp .env.example .env
+# Fill in: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY
 
 # Start server
 python main.py
@@ -400,8 +411,18 @@ cd phone
 # Install dependencies
 npm install
 
-# Run on Android device
-npx react-native run-android
+# Build and install on device
+cd android && ./gradlew app:assembleDebug && cd ..
+
+# Install APK (use Windows adb if in WSL2)
+adb install -r android/app/build/outputs/apk/debug/app-debug.apk
+
+# Set up USB port forwarding
+adb reverse tcp:8765 tcp:8765  # Server
+adb reverse tcp:8081 tcp:8081  # Metro dev server
+
+# Start Metro bundler
+npx react-native start --host 0.0.0.0
 ```
 
 After installing, enable the Accessibility Service:
@@ -415,9 +436,6 @@ After installing, enable the Accessibility Service:
 # Server
 WS_HOST=0.0.0.0
 WS_PORT=8765
-
-# Google Maps (Geocoding + Directions)
-GOOGLE_MAPS_API_KEY=your_key_here
 
 # AWS Rekognition
 AWS_REGION=us-east-1

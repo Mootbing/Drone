@@ -22,7 +22,7 @@ import { DroneMode, PCToPhone, CommandMessage } from '../types/protocol';
 
 type Props = {
   navigation: NativeStackNavigationProp<any>;
-  route: { params?: { deliveryMessage?: string } };
+  route: { params?: { deliveryMessage?: string; testMode?: boolean } };
 };
 
 export default function WatchScreen({ navigation, route }: Props) {
@@ -33,6 +33,7 @@ export default function WatchScreen({ navigation, route }: Props) {
   const [confidence, setConfidence] = useState<number | null>(null);
   const [connected, setConnected] = useState(wsService.isConnected);
   const deliveryMessage = route.params?.deliveryMessage || 'You have a delivery!';
+  const testMode = route.params?.testMode || false;
 
   // Track connection state reactively
   useEffect(() => {
@@ -77,22 +78,27 @@ export default function WatchScreen({ navigation, route }: Props) {
     let frameUnsub: (() => void) | null = null;
 
     const startCapture = async () => {
-      const started = await screenCapture.startCapture();
-      if (!started) {
-        setStatusMessage('Screen capture permission denied');
-        return;
-      }
+      try {
+        const started = await screenCapture.startCapture();
+        if (!started) {
+          setStatusMessage('Screen capture permission denied');
+          return;
+        }
 
-      frameUnsub = screenCapture.onFrame((frameBase64) => {
-        wsService.send({
-          type: 'frame',
-          timestamp: Date.now(),
-          gps: { lat: 0, lng: 0, alt: 0 }, // TODO: integrate real GPS
-          frame: frameBase64,
+        frameUnsub = screenCapture.onFrame((frameBase64) => {
+          wsService.send({
+            type: 'frame',
+            timestamp: Date.now(),
+            gps: { lat: 0, lng: 0, alt: 0 }, // TODO: integrate real GPS
+            frame: frameBase64,
+          });
         });
-      });
 
-      setStatusMessage('Screen capture active');
+        setStatusMessage(testMode ? 'Test mode — streaming active' : 'Screen capture active');
+      } catch (err) {
+        setStatusMessage('Screen capture failed — check permissions');
+        console.error('Screen capture error:', err);
+      }
     };
 
     startCapture();
@@ -101,7 +107,7 @@ export default function WatchScreen({ navigation, route }: Props) {
       frameUnsub?.();
       screenCapture.stopCapture().catch(console.error);
     };
-  }, []);
+  }, [testMode]);
 
   const handleAbort = useCallback(() => {
     Alert.alert(

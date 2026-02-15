@@ -12,12 +12,14 @@ import android.hardware.display.VirtualDisplay
 import android.media.ImageReader
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
+import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.util.Base64
 import android.util.DisplayMetrics
+import android.util.Log
 import android.view.WindowManager
 import com.facebook.react.bridge.Arguments
 import com.facebook.react.bridge.ReactApplicationContext
@@ -32,6 +34,7 @@ import java.util.*
 class ScreenCaptureService : Service() {
 
     companion object {
+        private const val TAG = "ScreenCaptureService"
         const val ACTION_START = "com.dronecontrol.screencapture.START"
         const val ACTION_STOP = "com.dronecontrol.screencapture.STOP"
         const val CHANNEL_ID = "screen_capture_channel"
@@ -77,12 +80,36 @@ class ScreenCaptureService : Service() {
             .setContentText("Capturing screen for drone navigation")
             .setSmallIcon(android.R.drawable.ic_menu_camera)
             .build()
-        startForeground(NOTIFICATION_ID, notification)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
+        } else {
+            startForeground(NOTIFICATION_ID, notification)
+        }
 
-        val data = projectionData ?: return
+        val data = projectionData ?: run {
+            Log.e(TAG, "No projection data available")
+            stopSelf()
+            return
+        }
         val projectionManager =
             getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
         mediaProjection = projectionManager.getMediaProjection(projectionResultCode, data)
+
+        if (mediaProjection == null) {
+            Log.e(TAG, "Failed to get MediaProjection")
+            stopSelf()
+            return
+        }
+
+        // Android 14+ requires registering a callback BEFORE createVirtualDisplay
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            mediaProjection!!.registerCallback(object : MediaProjection.Callback() {
+                override fun onStop() {
+                    Log.i(TAG, "MediaProjection stopped by system")
+                    handler.post { stopProjection() }
+                }
+            }, handler)
+        }
 
         // Set up ImageReader
         imageReader = ImageReader.newInstance(
@@ -91,8 +118,10 @@ class ScreenCaptureService : Service() {
         )
 
         // Get screen density
-        val windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
         val metrics = DisplayMetrics()
+        @Suppress("DEPRECATION")
+        val windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
+        @Suppress("DEPRECATION")
         windowManager.defaultDisplay.getMetrics(metrics)
 
         // Create virtual display
@@ -105,13 +134,15 @@ class ScreenCaptureService : Service() {
             null, handler
         )
 
+        Log.i(TAG, "Screen capture started at ${CAPTURE_WIDTH}x${CAPTURE_HEIGHT}")
+
         // Start capture timer
         captureTimer = Timer().apply {
             scheduleAtFixedRate(object : TimerTask() {
                 override fun run() {
                     captureFrame()
                 }
-            }, 0, CAPTURE_INTERVAL_MS)
+            }, 500, CAPTURE_INTERVAL_MS)
         }
     }
 
@@ -147,6 +178,8 @@ class ScreenCaptureService : Service() {
             // Encode to base64 and emit to RN
             val base64Frame = Base64.encodeToString(outputStream.toByteArray(), Base64.NO_WRAP)
             emitFrame(base64Frame)
+        } catch (e: Exception) {
+            Log.e(TAG, "Frame capture error", e)
         } finally {
             image.close()
         }
