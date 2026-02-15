@@ -44,7 +44,13 @@ adb.exe reverse tcp:8765 tcp:8765    # Python server
 adb.exe reverse tcp:8081 tcp:8081    # Metro bundler (dev)
 ```
 
-Run these after every USB reconnect.
+USB tunnels drop frequently. Use the keepalive script to auto-re-establish every 3 seconds:
+
+```bash
+./adb-tunnel.sh    # runs in foreground, Ctrl+C to stop
+```
+
+Or run it in the background: `./adb-tunnel.sh &`
 
 ### Restarting the App
 
@@ -57,11 +63,12 @@ adb.exe shell am start -n com.dronecontrol/.MainActivity
 
 ```bash
 cd server
-pip install -r requirements.txt    # installs ultralytics (YOLOv8), fastapi, boto3, etc.
+python3 -m venv venv && source venv/bin/activate
+pip install -r requirements.txt    # installs ultralytics (YOLOv8), fastapi, boto3, httpx, etc.
 python3 main.py                    # starts on 0.0.0.0:8765
 ```
 
-YOLOv8 nano weights (~6MB) auto-download on first detection run.
+YOLOv8 nano model (~6MB) pre-loads at server startup with a warmup inference, so first detection is instant. The dashboard shows a loading bar until the model is ready.
 
 ### AWS Rekognition Credentials
 
@@ -91,7 +98,7 @@ cd server && python3 main.py
 
 ```bash
 curl http://localhost:8765/health
-# -> {"status":"ok","state":"input"}
+# -> {"status":"ok","state":"input","model_ready":true,"model_loading":false}
 ```
 
 ## Phone App Setup

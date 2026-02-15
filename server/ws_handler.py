@@ -130,6 +130,7 @@ class ConnectionManager:
             "target_address": ctx.target_address,
             "detect_enabled": self.detect_enabled,
             "has_reference": self.reference_photo_bytes is not None,
+            "model_ready": self.person_detector.model_ready,
         })
         stale = []
         for client in self.dashboard_clients:

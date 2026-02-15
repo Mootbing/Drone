@@ -19,15 +19,28 @@ class PersonDetector:
 
     def __init__(self):
         self._model = None
+        self.model_ready: bool = False
+        self.model_loading: bool = False
 
-    def _load(self):
-        """Lazy-load the YOLO model on first use."""
+    def load(self):
+        """Load the YOLO model. Can be called from a thread at startup."""
         if self._model is not None:
             return
+        self.model_loading = True
         from ultralytics import YOLO
         logger.info("Loading YOLOv8n model...")
         self._model = YOLO("yolov8n.pt")
-        logger.info("YOLOv8n model loaded")
+        # Warm up with a dummy frame so first real inference isn't slow
+        self._model(np.zeros((64, 64, 3), dtype=np.uint8), verbose=False)
+        self.model_loading = False
+        self.model_ready = True
+        logger.info("YOLOv8n model loaded and warmed up")
+
+    def _load(self):
+        """Lazy-load fallback if not pre-loaded at startup."""
+        if self._model is not None:
+            return
+        self.load()
 
     def detect(self, frame: np.ndarray) -> List[Dict]:
         """Detect persons in a BGR frame.

@@ -1,5 +1,6 @@
 """FastAPI entry point for the drone control server."""
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 
@@ -23,6 +24,9 @@ manager = ConnectionManager()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Drone Control Server starting on %s:%d", WS_HOST, WS_PORT)
+    # Pre-load YOLO in a background thread so it doesn't block the event loop
+    loop = asyncio.get_event_loop()
+    loop.run_in_executor(None, manager.person_detector.load)
     yield
 
 
@@ -34,7 +38,13 @@ http_client = httpx.AsyncClient(timeout=15.0)
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "state": manager.sm.state.value}
+    det = manager.person_detector
+    return {
+        "status": "ok",
+        "state": manager.sm.state.value,
+        "model_ready": det.model_ready,
+        "model_loading": det.model_loading,
+    }
 
 
 @app.get("/geocode")
@@ -178,6 +188,13 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   .toggle-btn { width: 100%; padding: 10px 16px; border-radius: 6px; border: 1px solid #333; cursor: pointer; font-size: 13px; font-weight: 600; transition: all 0.15s; }
   .toggle-off { background: #1a1a2a; color: #888; }
   .toggle-on { background: #1a3a1a; color: #2ecc71; border-color: #2ecc71; }
+  .toggle-loading { background: #1a1a1a; color: #555; border-color: #222; cursor: not-allowed; }
+  .loading-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.92); z-index: 100; display: flex; flex-direction: column; align-items: center; justify-content: center; }
+  .loading-overlay h2 { color: #fff; font-size: 22px; margin-bottom: 24px; font-weight: 600; }
+  .loading-overlay .sub { color: #888; font-size: 14px; margin-top: 12px; }
+  .progress-bar { width: 320px; height: 6px; background: #222; border-radius: 3px; overflow: hidden; }
+  .progress-fill { height: 100%; background: linear-gradient(90deg, #5dade2, #2ecc71); border-radius: 3px; transition: width 0.3s ease; animation: pulse 1.5s ease-in-out infinite; }
+  @keyframes pulse { 0%, 100% { opacity: 0.7; } 50% { opacity: 1; } }
   .log-area { font-family: monospace; font-size: 12px; color: #888; max-height: 180px; overflow-y: auto; padding: 8px; background: #0a0a0a; border-radius: 6px; }
   .log-area div { padding: 1px 0; }
   .log-area .log-frame { color: #555; }
@@ -186,6 +203,11 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 </style>
 </head>
 <body>
+<div class="loading-overlay" id="loadingOverlay">
+  <h2>Loading YOLOv8 Model...</h2>
+  <div class="progress-bar"><div class="progress-fill" id="progressFill" style="width:10%"></div></div>
+  <div class="sub" id="loadingStatus">Initializing...</div>
+</div>
 <div class="header">
   <h1>Drone Control Dashboard</h1>
   <div>
@@ -207,8 +229,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     </div>
     <div class="panel">
       <div class="panel-title">Detection</div>
-      <button class="toggle-btn toggle-off" id="detectBtn" onclick="toggleDetect()">Detect: OFF</button>
-      <div style="color:#555;font-size:11px;margin-top:6px">Runs every 10th frame (~1 detect/sec)</div>
+      <button class="toggle-btn toggle-loading" id="detectBtn" onclick="toggleDetect()" disabled>Loading model...</button>
+      <div style="color:#555;font-size:11px;margin-top:6px" id="detectHint">Waiting for YOLOv8 to load</div>
       <div class="stat-row" style="margin-top:8px"><span class="stat-label">Reference Photo</span><span class="stat-value" id="refStatus" style="color:#e74c3c">None</span></div>
     </div>
     <div class="panel">
@@ -336,7 +358,12 @@ function updateMeta(msg) {
 
   document.getElementById('waypoint').textContent = msg.waypoint;
   document.getElementById('targetAddr').textContent = msg.target_address || '—';
-  updateDetectBtn(msg.detect_enabled);
+  if (msg.model_ready && !modelReady) {
+    modelReady = true;
+    document.getElementById('loadingOverlay').style.display = 'none';
+    enableDetectBtn();
+  }
+  if (modelReady) updateDetectBtn(msg.detect_enabled);
   const refEl = document.getElementById('refStatus');
   if (msg.has_reference) { refEl.textContent = 'Uploaded'; refEl.style.color = '#2ecc71'; }
   else { refEl.textContent = 'None'; refEl.style.color = '#e74c3c'; }
@@ -392,6 +419,49 @@ function updateDetectBtn(enabled) {
   }
 }
 
+// --- Model loading status ---
+let modelReady = false;
+let progressVal = 10;
+
+async function pollModelStatus() {
+  const overlay = document.getElementById('loadingOverlay');
+  const fill = document.getElementById('progressFill');
+  const status = document.getElementById('loadingStatus');
+
+  while (!modelReady) {
+    try {
+      const resp = await fetch('/health');
+      const data = await resp.json();
+      if (data.model_ready) {
+        modelReady = true;
+        fill.style.width = '100%';
+        status.textContent = 'Ready!';
+        setTimeout(() => { overlay.style.display = 'none'; }, 400);
+        enableDetectBtn();
+        break;
+      } else if (data.model_loading) {
+        progressVal = Math.min(progressVal + 8, 90);
+        fill.style.width = progressVal + '%';
+        status.textContent = 'Loading YOLOv8 weights...';
+      } else {
+        progressVal = Math.min(progressVal + 3, 30);
+        fill.style.width = progressVal + '%';
+        status.textContent = 'Initializing...';
+      }
+    } catch(e) {}
+    await new Promise(r => setTimeout(r, 500));
+  }
+}
+
+function enableDetectBtn() {
+  const btn = document.getElementById('detectBtn');
+  btn.disabled = false;
+  btn.className = 'toggle-btn toggle-off';
+  btn.textContent = 'Detect: OFF';
+  document.getElementById('detectHint').textContent = 'Runs every 10th frame (~1 detect/sec)';
+}
+
+pollModelStatus();
 connect();
 </script>
 </body>
