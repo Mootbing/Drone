@@ -33,6 +33,7 @@ class ConnectionManager:
         self.sm = StateMachine()
         self.person_detector = PersonDetector()
         self.detect_enabled: bool = False
+        self.reference_photo_bytes: Optional[bytes] = None
         self._detect_interval: int = 10  # run YOLO every Nth frame
         self._detect_frame_counter: int = 0
         self._cached_detections: list = []
@@ -127,6 +128,7 @@ class ConnectionManager:
             "waypoint": f"{ctx.current_waypoint_idx}/{len(ctx.waypoints)}" if ctx.waypoints else "—",
             "target_address": ctx.target_address,
             "detect_enabled": self.detect_enabled,
+            "has_reference": self.reference_photo_bytes is not None,
         })
         stale = []
         for client in self.dashboard_clients:
@@ -160,6 +162,8 @@ class ConnectionManager:
             await self._handle_abort()
         elif msg_type == "delivery_confirmed":
             await self._handle_delivery_confirmed()
+        elif msg_type == "reference_photo":
+            self._handle_reference_photo(msg)
         elif msg_type == "ping":
             await self.send_json({"type": "pong", "timestamp": time.time()})
         else:
@@ -445,10 +449,11 @@ class ConnectionManager:
         return detections
 
     async def _process_detect_only(self, frame: np.ndarray) -> list:
-        """Run person detection without face matching or navigation commands.
+        """Run person detection and optional face matching.
 
         Only runs YOLO every N frames to maintain high FPS.
         Reuses cached detections for in-between frames.
+        When a reference photo is available, runs Rekognition on each crop.
         """
         self._detect_frame_counter += 1
         if self._detect_frame_counter % self._detect_interval != 1 and self._cached_detections:
@@ -457,11 +462,26 @@ class ConnectionManager:
         persons = await asyncio.get_event_loop().run_in_executor(
             None, self.person_detector.detect, frame
         )
-        self._cached_detections = [
-            {"bbox": p["bbox"], "type": "person", "matched": False,
-             "confidence": round(p["confidence"] * 100, 1)}
-            for p in persons
-        ]
+
+        detections = []
+        for p in persons:
+            bbox = p["bbox"]
+            det = {"bbox": bbox, "type": "person", "matched": False,
+                   "confidence": round(p["confidence"] * 100, 1)}
+
+            if self.reference_photo_bytes:
+                face_crop = frame[bbox[1]:bbox[3], bbox[0]:bbox[2]]
+                match_result = await asyncio.get_event_loop().run_in_executor(
+                    None, compare_face, self.reference_photo_bytes, face_crop
+                )
+                if match_result:
+                    det["confidence"] = match_result["confidence"]
+                    if match_result["confidence"] >= REKOGNITION_SIMILARITY_THRESHOLD:
+                        det["matched"] = True
+
+            detections.append(det)
+
+        self._cached_detections = detections
         return self._cached_detections
 
     async def handle_dashboard_message(self, raw: str):
@@ -473,6 +493,19 @@ class ConnectionManager:
         if msg.get("type") == "toggle_detect":
             self.detect_enabled = not self.detect_enabled
             logger.info("Detection toggle: %s", "ON" if self.detect_enabled else "OFF")
+
+    def _handle_reference_photo(self, msg: dict):
+        """Store reference photo for face matching."""
+        photo_b64 = msg.get("photo", "")
+        if photo_b64:
+            try:
+                self.reference_photo_bytes = base64.b64decode(photo_b64)
+                logger.info("Reference photo received (%d bytes)", len(self.reference_photo_bytes))
+            except Exception:
+                logger.warning("Invalid reference photo data")
+        else:
+            self.reference_photo_bytes = None
+            logger.info("Reference photo cleared")
 
     def _handle_status(self, msg: dict):
         """Log phone status updates."""

@@ -7,7 +7,7 @@ import { View, Text, StyleSheet, NativeModules, Dimensions, Alert } from 'react-
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import wsService from '../services/WebSocketService';
 import screenCapture from '../services/ScreenCapture';
-import { launchDroneApp } from './SettingsScreen';
+import { launchDroneApp, getReferencePhoto } from './SettingsScreen';
 import { getActionPoints } from './ActionRecorderScreen';
 
 type Props = {
@@ -77,6 +77,12 @@ export default function WatchScreen({ navigation, route }: Props) {
         });
 
         setStatus('Streaming live via USB.\nDo not unplug.');
+
+        // Send reference photo if available
+        const refPhoto = getReferencePhoto();
+        if (refPhoto) {
+          wsService.send({ type: 'reference_photo', photo: refPhoto });
+        }
 
         // After capture confirmed, launch drone app and tap takeoff
         if (!route.params?.testMode) {

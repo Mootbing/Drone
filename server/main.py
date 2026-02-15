@@ -182,6 +182,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <div class="panel-title">Detection</div>
       <button class="toggle-btn toggle-off" id="detectBtn" onclick="toggleDetect()">Detect: OFF</button>
       <div style="color:#555;font-size:11px;margin-top:6px">Runs every 10th frame (~1 detect/sec)</div>
+      <div class="stat-row" style="margin-top:8px"><span class="stat-label">Reference Photo</span><span class="stat-value" id="refStatus" style="color:#e74c3c">None</span></div>
     </div>
     <div class="panel">
       <div class="panel-title">Stream</div>
@@ -309,6 +310,9 @@ function updateMeta(msg) {
   document.getElementById('waypoint').textContent = msg.waypoint;
   document.getElementById('targetAddr').textContent = msg.target_address || '—';
   updateDetectBtn(msg.detect_enabled);
+  const refEl = document.getElementById('refStatus');
+  if (msg.has_reference) { refEl.textContent = 'Uploaded'; refEl.style.color = '#2ecc71'; }
+  else { refEl.textContent = 'None'; refEl.style.color = '#e74c3c'; }
 
   const detList = document.getElementById('detList');
   if (msg.detections && msg.detections.length > 0) {
