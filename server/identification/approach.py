@@ -42,8 +42,8 @@ def compute_approach_command(
     # Compute center of bbox relative to frame center
     bbox_cx = (x1 + x2) / 2
     bbox_cy = (y1 + y2) / 2
-    frame_cx = frame_width / 2
-    frame_cy = frame_height / 2
+    frame_cx = max(frame_width / 2, 1)
+    frame_cy = max(frame_height / 2, 1)
 
     # Normalized offsets (-1 to 1)
     offset_x = (bbox_cx - frame_cx) / frame_cx

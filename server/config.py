@@ -1,6 +1,9 @@
 """Configuration constants and API keys for the drone control server."""
 
 import os
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # --- Server ---
 WS_HOST = os.getenv("WS_HOST", "0.0.0.0")
@@ -23,5 +26,6 @@ SAM_DEVICE = os.getenv("SAM_DEVICE", "cuda")  # "cuda" or "cpu"
 # --- Navigation ---
 WAYPOINT_REACHED_RADIUS_M = float(os.getenv("WAYPOINT_REACHED_RADIUS_M", "10.0"))
 IDENTIFICATION_RANGE_M = float(os.getenv("IDENTIFICATION_RANGE_M", "50.0"))
+OBSTACLE_DETECTION_ENABLED = os.getenv("OBSTACLE_DETECTION_ENABLED", "false").lower() == "true"
 OBSTACLE_CENTER_THRESHOLD = 0.3  # fraction of frame center considered "in path"
 OBSTACLE_MIN_AREA_FRACTION = 0.05  # minimum segment area to count as obstacle

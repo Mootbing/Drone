@@ -11,7 +11,7 @@ import cv2
 import numpy as np
 from fastapi import WebSocket
 
-from config import IDENTIFICATION_RANGE_M, WAYPOINT_REACHED_RADIUS_M, REKOGNITION_SIMILARITY_THRESHOLD
+from config import IDENTIFICATION_RANGE_M, WAYPOINT_REACHED_RADIUS_M, REKOGNITION_SIMILARITY_THRESHOLD, OBSTACLE_DETECTION_ENABLED
 from state_machine import StateMachine, DroneState
 from navigation.geocoder import geocode_address
 from navigation.router import get_route_waypoints
@@ -192,7 +192,7 @@ class ConnectionManager:
         # Other states: no frame processing needed
 
     async def _process_navigation(self, frame: np.ndarray):
-        """Navigation mode: follow waypoints + obstacle avoidance."""
+        """Navigation mode: follow waypoints, with optional obstacle avoidance."""
         ctx = self.sm.context
 
         # Check if we've reached the destination zone
@@ -214,21 +214,26 @@ class ConnectionManager:
                 logger.info("Reached waypoint %d/%d",
                             ctx.current_waypoint_idx, len(ctx.waypoints))
 
-        # Check obstacles via SAM
-        masks = await asyncio.get_event_loop().run_in_executor(
-            None, self.sam.generate_masks, frame
-        )
-        obstacle_cmd = detect_obstacles(frame, masks)
+        # Obstacle detection (disabled by default — skips SAM to save compute)
+        obstacle_cmd = None
+        if OBSTACLE_DETECTION_ENABLED:
+            masks = await asyncio.get_event_loop().run_in_executor(
+                None, self.sam.generate_masks, frame
+            )
+            obstacle_cmd = detect_obstacles(frame, masks)
 
         if obstacle_cmd:
-            # Obstacle avoidance takes priority
+            # Obstacle avoidance takes priority — optionally reroute
             await self.send_command(
                 obstacle_cmd["direction"],
                 obstacle_cmd["intensity"],
                 obstacle_cmd.get("duration_ms", 500),
             )
+            # Trigger reroute if the obstacle requires path replanning
+            if obstacle_cmd.get("reroute"):
+                await self._reroute_from_current_position()
         else:
-            # Follow route
+            # Follow planned route
             if ctx.current_waypoint_idx < len(ctx.waypoints):
                 wp = ctx.waypoints[ctx.current_waypoint_idx]
                 cmd = compute_navigation_command(
@@ -243,6 +248,30 @@ class ConnectionManager:
                     ctx.target_lat, ctx.target_lng,
                 )
                 await self.send_command(cmd["direction"], cmd["intensity"])
+
+    async def _reroute_from_current_position(self):
+        """Replan route from current GPS to target via Google Maps.
+
+        Called when obstacle detection triggers a reroute. Gets fresh
+        waypoints from the Directions API starting from the drone's
+        current position, replacing the remaining route.
+        """
+        ctx = self.sm.context
+        try:
+            waypoints = get_route_waypoints(
+                ctx.current_lat, ctx.current_lng,
+                ctx.target_lat, ctx.target_lng,
+            )
+            ctx.waypoints = waypoints
+            ctx.current_waypoint_idx = 0
+            logger.info("Rerouted: %d new waypoints from current position", len(waypoints))
+            await self.send_json({
+                "type": "mode_change",
+                "mode": "navigation",
+                "message": f"Rerouted: {len(waypoints)} waypoints to destination",
+            })
+        except Exception:
+            logger.exception("Reroute failed, continuing on current path")
 
     async def _process_identification(self, frame: np.ndarray):
         """Identification mode: find and match target person."""

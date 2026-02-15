@@ -1,53 +1,118 @@
-"""SAM-based obstacle detection from video frames.
+"""Obstacle detection from video frames.
 
-Analyzes SAM segmentation masks to identify obstacles in the drone's flight path
-and computes avoidance commands.
+Currently disabled — the drone flies its planned route without obstacle detection.
+To enable, set OBSTACLE_DETECTION_ENABLED=true in .env and implement a detection
+backend (e.g., depth estimation, YOLO, or custom SAM classifier).
+
+The interface is preserved so a proper detection model can be dropped in later.
+When an obstacle is detected, the system can trigger a reroute via Google Maps
+to replan the remaining route around the obstruction.
 """
 
 import logging
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional
 
-import cv2
 import numpy as np
 
-from config import OBSTACLE_CENTER_THRESHOLD, OBSTACLE_MIN_AREA_FRACTION
+from config import (
+    OBSTACLE_DETECTION_ENABLED,
+    OBSTACLE_CENTER_THRESHOLD,
+    OBSTACLE_MIN_AREA_FRACTION,
+)
 
 logger = logging.getLogger(__name__)
 
-# Heuristic color ranges (HSV) for classifying segments
-# Sky tends to be blue/light, obstacles tend to be dark/green/brown
-SKY_HUE_RANGE = (90, 140)  # blue hues
-SKY_SAT_MAX = 150
-SKY_VAL_MIN = 120
+# Type alias for obstacle detection backends
+# A backend takes (frame, masks) and returns an avoidance command or None.
+ObstacleDetectorBackend = Callable[[np.ndarray, List[Dict]], Optional[Dict]]
+
+# Registry of available backends — add new ones here
+_backends: Dict[str, ObstacleDetectorBackend] = {}
+
+
+def register_backend(name: str, backend: ObstacleDetectorBackend):
+    """Register a named obstacle detection backend.
+
+    Example:
+        def my_depth_detector(frame, masks):
+            # ... depth estimation logic ...
+            return {"direction": "up", "intensity": 0.7, "duration_ms": 600}
+
+        register_backend("depth", my_depth_detector)
+    """
+    _backends[name] = backend
+    logger.info("Registered obstacle detection backend: %s", name)
 
 
 def detect_obstacles(
     frame: np.ndarray,
     masks: List[Dict],
+    backend: Optional[str] = None,
 ) -> Optional[Dict]:
-    """Analyze frame + SAM masks for obstacles in the flight path.
+    """Analyze frame for obstacles in the flight path.
 
     Args:
         frame: BGR image (H, W, 3)
-        masks: List of SAM mask dicts with 'segmentation' (bool array) and 'area'
+        masks: List of SAM mask dicts with 'segmentation' and 'area'
+        backend: Name of registered backend to use. If None, uses default.
 
     Returns:
         Avoidance command dict if obstacle detected, None if path is clear.
         Command format: {"direction": str, "intensity": float, "duration_ms": int}
+
+    When obstacle detection is disabled (OBSTACLE_DETECTION_ENABLED=false),
+    this always returns None so the drone follows its planned route.
     """
+    if not OBSTACLE_DETECTION_ENABLED:
+        return None
+
     if not masks:
         return None
+
+    # Use specified backend or fall back to first registered one
+    if backend and backend in _backends:
+        detector = _backends[backend]
+    elif _backends:
+        detector = next(iter(_backends.values()))
+    else:
+        logger.debug("No obstacle detection backend registered")
+        return None
+
+    try:
+        return detector(frame, masks)
+    except Exception:
+        logger.exception("Obstacle detection backend failed")
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Example placeholder backend (not registered by default)
+# ---------------------------------------------------------------------------
+
+def _hsv_sky_detector(frame: np.ndarray, masks: List[Dict]) -> Optional[Dict]:
+    """Crude sky-vs-not-sky obstacle detector using HSV color heuristics.
+
+    This is a placeholder implementation. For production use, replace with
+    a proper depth estimation model (e.g., MiDaS, ZoeDepth) or object
+    detection model (e.g., YOLO) that can reliably identify buildings,
+    trees, wires, and other flight-path obstructions.
+
+    To enable: register_backend("hsv_sky", _hsv_sky_detector)
+    """
+    import cv2
+
+    SKY_HUE_RANGE = (90, 140)
+    SKY_SAT_MAX = 150
+    SKY_VAL_MIN = 120
 
     h, w = frame.shape[:2]
     total_pixels = h * w
 
-    # Define center region (where obstacles matter for forward flight)
     center_left = int(w * (0.5 - OBSTACLE_CENTER_THRESHOLD / 2))
     center_right = int(w * (0.5 + OBSTACLE_CENTER_THRESHOLD / 2))
-    center_top = int(h * 0.2)  # top 20% is typically sky
+    center_top = int(h * 0.2)
     center_bottom = int(h * 0.9)
 
-    # Convert frame to HSV for color classification
     try:
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
     except Exception:
@@ -67,7 +132,6 @@ def detect_obstacles(
         if area_fraction < OBSTACLE_MIN_AREA_FRACTION:
             continue
 
-        # Classify this segment by average color
         mask_pixels = hsv[seg]
         if len(mask_pixels) == 0:
             continue
@@ -81,7 +145,6 @@ def detect_obstacles(
                   avg_val > SKY_VAL_MIN)
 
         if is_sky:
-            # Track sky distribution for avoidance direction
             seg_coords = np.where(seg)
             if len(seg_coords[1]) > 0:
                 avg_x = np.mean(seg_coords[1])
@@ -93,15 +156,12 @@ def detect_obstacles(
                 if avg_y < h / 3:
                     sky_top += area_fraction
         else:
-            # Check if this non-sky segment is in the center (obstacle)
             center_mask = seg[center_top:center_bottom, center_left:center_right]
             center_coverage = np.sum(center_mask) / max(center_mask.size, 1)
             if center_coverage > 0.3:
                 obstacle_in_center += area_fraction
 
-    # Decision: if significant obstacle in center, issue avoidance
     if obstacle_in_center > 0.15:
-        # Move toward largest sky gap
         if sky_left > sky_right and sky_left > sky_top:
             direction = "left"
         elif sky_right > sky_left and sky_right > sky_top:
@@ -109,11 +169,10 @@ def detect_obstacles(
         elif sky_top > 0.1:
             direction = "up"
         else:
-            # Default: go up to clear obstacle
             direction = "up"
 
         intensity = min(0.9, obstacle_in_center * 2)
-        logger.info("Obstacle detected (%.1f%% center coverage) → %s (%.1f)",
+        logger.info("Obstacle detected (%.1f%% center coverage) -> %s (%.1f)",
                     obstacle_in_center * 100, direction, intensity)
         return {
             "direction": direction,

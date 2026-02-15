@@ -1,0 +1,29 @@
+# Environment variables (contains API keys)
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+venv/
+.venv/
+
+# SAM model checkpoints (large binary files)
+server/models/*.pth
+
+# Node / React Native
+node_modules/
+phone/node_modules/
+phone/android/app/build/
+phone/android/build/
+phone/android/.gradle/
+phone/ios/Pods/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
