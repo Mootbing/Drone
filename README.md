@@ -15,7 +15,7 @@ All network traffic between the phone and server runs over USB via `adb reverse`
 │  ┌──────────────┐    ┌──────────────────┐    ┌───────────────────┐   │
 │  │ React Native │    │ MediaProjection  │    │  Accessibility    │   │
 │  │   App UI     │───▶│ Screen Capture   │    │  Service (Touch)  │   │
-│  │              │    │ (1 fps, 720p)    │    │  Gesture Inject   │   │
+│  │              │    │ (10fps, 2400x1080)│    │  Gesture Inject   │   │
 │  └──────┬───────┘    └────────┬─────────┘    └───────▲───────────┘   │
 │         │                     │                      │               │
 │         │              base64 JPEG frames      swipe gestures        │
@@ -63,17 +63,15 @@ All network traffic between the phone and server runs over USB via `adb reverse`
 ### 1. Mission Input
 
 The user opens the phone app and enters:
-- **Delivery address** — search via autocomplete (Nominatim) or drop a pin on the map
+- **Delivery address** — search via autocomplete (Nominatim)
 - **Reference photo** of the target person (from camera or gallery)
 - **Delivery message** (default: "moo")
 
 The address is geocoded via **Nominatim** (free, no API key) through the server proxy. A street-level route is computed via **OSRM** and displayed on a **Leaflet/OpenStreetMap** map rendered in a WebView. The map shows the user's GPS location, the destination, and the driving route.
 
-A **map picker** modal lets the user tap to drop a pin, see the route drawn, and confirm — the server reverse-geocodes the pin coordinates back to an address.
-
 ### 2. Navigation
 
-The drone follows the planned waypoints sequentially at altitude, staying above streets. For each frame received from the phone (~1 fps):
+The drone follows the planned waypoints sequentially at altitude, staying above streets. For each frame received from the phone (~10 fps):
 
 1. **GPS comparison**: The server compares the drone's current GPS to the next waypoint using haversine distance
 2. **Heading computation**: Bearing from current position to target waypoint is computed, then compared to the drone's heading
@@ -145,8 +143,8 @@ INPUT ──▶ NAVIGATION ──▶ IDENTIFICATION ──▶ APPROACH ──▶
 
 | Screen | Purpose |
 |--------|---------|
-| `InputScreen` | Server connection, address search/map picker, reference photo, delivery message, test mode |
-| `WatchScreen` | Main flight screen — starts capture, receives commands, shows overlay |
+| `InputScreen` | Server connection, address search, reference photo, delivery message, test mode |
+| `WatchScreen` | Streaming screen — starts capture, black screen with "Streaming live via USB" status |
 | `DeliveryScreen` | Displays delivery message, confirm button |
 
 ### Features
@@ -154,9 +152,9 @@ INPUT ──▶ NAVIGATION ──▶ IDENTIFICATION ──▶ APPROACH ──▶
 - **Auto-connect** to WebSocket server on launch (`ws://localhost:8765/ws`)
 - **Server URL modal** — reconfigure connection via button
 - **Address autocomplete** — debounced Nominatim search through server proxy
-- **Map picker** — fullscreen modal with pin drop, user GPS marker, and route preview
 - **Route map** — Leaflet + OSM tiles rendered in WebView, shows driving route from user to destination
-- **Test mode** — "Test" button skips validation and goes straight to the Watch screen without screen capture
+- **Test mode** — "Test" button skips validation and goes straight to the Watch screen
+- **Live dashboard** — browser UI at `http://localhost:8765/dashboard` shows live stream, detections, GPS, mission state
 - **Dark UI** — black background (#000), white buttons, dark inputs
 
 ### Native Modules (Kotlin)
@@ -164,7 +162,7 @@ INPUT ──▶ NAVIGATION ──▶ IDENTIFICATION ──▶ APPROACH ──▶
 **Screen Capture** (`ScreenCaptureModule` + `ScreenCaptureService`):
 - Uses Android **MediaProjection API** to capture the drone manufacturer's app screen
 - Runs as a foreground service with `mediaProjection` foreground service type
-- Captures at 1280x720, JPEG quality 70, ~1 frame per second
+- Captures at 2400x1080 (native resolution), JPEG quality 85, ~10 fps
 - Emits `onFrameCaptured` events with base64 JPEG data
 
 **Touch Injection** (`DroneAccessibilityService` + `TouchInjectorModule`):
@@ -185,6 +183,8 @@ Since the phone's WiFi is connected to the drone, all HTTP requests go through t
 | `GET /route?from_lat=...&from_lng=...&to_lat=...&to_lng=...` | OSRM driving route |
 | `GET /tile/{z}/{x}/{y}.png` | OpenStreetMap tile proxy |
 | `GET /health` | Server health check |
+| `GET /dashboard` | Live web dashboard (stream, detections, GPS, state) |
+| `WS /ws/dashboard` | Dashboard WebSocket (binary JPEG frames + JSON metadata) |
 
 ---
 
@@ -194,13 +194,13 @@ All communication is over a single WebSocket connection (`ws://localhost:8765/ws
 
 ### Phone → PC
 
-**Frame** (~1 fps):
+**Frame** (~10 fps):
 ```json
 {
   "type": "frame",
   "timestamp": 1700000000000,
   "gps": { "lat": 40.7128, "lng": -74.0060, "alt": 30.0 },
-  "frame": "<base64 JPEG, 720p>"
+  "frame": "<base64 JPEG, 2400x1080>"
 }
 ```
 
@@ -330,7 +330,7 @@ Drone/
 │   ├── src/
 │   │   ├── screens/
 │   │   │   ├── InputScreen.tsx          # Mission setup UI + map + address search
-│   │   │   ├── WatchScreen.tsx          # Flight control + overlay + test mode
+│   │   │   ├── WatchScreen.tsx          # Streaming screen (capture + USB stream)
 │   │   │   └── DeliveryScreen.tsx       # Delivery confirmation
 │   │   ├── services/
 │   │   │   ├── WebSocketService.ts      # WebSocket client (singleton, reconnect, heartbeat)
