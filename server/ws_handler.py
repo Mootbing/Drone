@@ -201,14 +201,19 @@ class ConnectionManager:
 
         self.sm.set_target(address, lat, lng, reference_bytes, delivery_message)
 
-        # Get route
-        if msg.get("gps"):
-            start_lat = msg["gps"]["lat"]
-            start_lng = msg["gps"]["lng"]
+        # Use phone-provided waypoints (turn-by-turn) if available
+        phone_waypoints = msg.get("waypoints")
+        if phone_waypoints and len(phone_waypoints) > 0:
+            waypoints = [{"lat": wp["lat"], "lng": wp["lng"]} for wp in phone_waypoints]
+            logger.info("Using %d waypoints from phone", len(waypoints))
         else:
-            start_lat, start_lng = lat, lng  # fallback
-
-        waypoints = get_route_waypoints(start_lat, start_lng, lat, lng)
+            # Fallback: compute route server-side
+            if msg.get("gps"):
+                start_lat = msg["gps"]["lat"]
+                start_lng = msg["gps"]["lng"]
+            else:
+                start_lat, start_lng = lat, lng
+            waypoints = get_route_waypoints(start_lat, start_lng, lat, lng)
         self.sm.set_route(waypoints)
 
         # Transition to navigation

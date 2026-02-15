@@ -57,7 +57,7 @@ async def route(
     to_lat: float = Query(...), to_lng: float = Query(...),
 ):
     """Proxy OSRM routing for phone."""
-    url = f"https://router.project-osrm.org/route/v1/driving/{from_lng},{from_lat};{to_lng},{to_lat}?overview=full&geometries=geojson"
+    url = f"https://router.project-osrm.org/route/v1/driving/{from_lng},{from_lat};{to_lng},{to_lat}?overview=full&geometries=geojson&steps=true"
     resp = await http_client.get(url)
     return Response(content=resp.content, media_type="application/json")
 
