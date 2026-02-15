@@ -43,8 +43,8 @@ class ScreenCaptureService : Service() {
         // Target capture dimensions (720p)
         const val CAPTURE_WIDTH = 1280
         const val CAPTURE_HEIGHT = 720
-        const val JPEG_QUALITY = 70
-        const val CAPTURE_INTERVAL_MS = 1000L // ~1fps
+        const val JPEG_QUALITY = 40
+        const val CAPTURE_INTERVAL_MS = 16L // ~60fps
 
         // Set by ScreenCaptureModule after permission granted
         var projectionResultCode: Int = 0

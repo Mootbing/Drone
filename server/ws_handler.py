@@ -98,13 +98,24 @@ class ConnectionManager:
         logger.info("Dashboard client disconnected (%d remaining)", len(self.dashboard_clients))
 
     async def _broadcast_dashboard(self, frame_b64: str, detections: list):
-        """Send frame + detections to all dashboard viewers."""
+        """Send frame + detections to all dashboard viewers.
+
+        Sends two messages per frame for efficiency:
+        1. Binary message with raw JPEG bytes (no base64 overhead)
+        2. Text message with JSON metadata (state, detections, GPS, etc.)
+        """
         if not self.dashboard_clients:
             return
+
+        # Decode base64 once, send raw JPEG bytes to all clients
+        try:
+            frame_bytes = base64.b64decode(frame_b64)
+        except Exception:
+            return
+
         ctx = self.sm.context
-        msg = json.dumps({
-            "type": "frame_update",
-            "frame": frame_b64,
+        meta = json.dumps({
+            "type": "meta",
             "state": self.sm.state.value,
             "detections": detections,
             "gps": {"lat": ctx.current_lat, "lng": ctx.current_lng, "alt": ctx.current_alt},
@@ -116,7 +127,8 @@ class ConnectionManager:
         stale = []
         for client in self.dashboard_clients:
             try:
-                await client.send_text(msg)
+                await client.send_bytes(frame_bytes)
+                await client.send_text(meta)
             except Exception:
                 stale.append(client)
         for s in stale:

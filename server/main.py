@@ -209,10 +209,13 @@ const noSignal = document.getElementById('noSignal');
 const img = new Image();
 let ws = null;
 let lastFrameTime = 0;
+let pendingBlob = null;
+let latestMeta = null;
 
 function connect() {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
   ws = new WebSocket(proto + '//' + location.host + '/ws/dashboard');
+  ws.binaryType = 'blob';
 
   ws.onopen = () => {
     document.getElementById('connDot').className = 'connection-dot dot-green';
@@ -227,32 +230,38 @@ function connect() {
     setTimeout(connect, 2000);
   };
 
-  ws.onerror = () => {
-    ws.close();
-  };
+  ws.onerror = () => { ws.close(); };
 
   ws.onmessage = (e) => {
-    try {
-      const msg = JSON.parse(e.data);
-      if (msg.type === 'frame_update') handleFrame(msg);
-    } catch(err) {}
+    if (e.data instanceof Blob) {
+      // Binary = raw JPEG frame
+      if (pendingBlob) URL.revokeObjectURL(pendingBlob);
+      pendingBlob = URL.createObjectURL(e.data);
+      drawFrame();
+    } else {
+      // Text = JSON metadata
+      try {
+        latestMeta = JSON.parse(e.data);
+        updateMeta(latestMeta);
+      } catch(err) {}
+    }
   };
 }
 
-function handleFrame(msg) {
+function drawFrame() {
+  if (!pendingBlob) return;
   noSignal.style.display = 'none';
   lastFrameTime = Date.now();
 
-  // Draw frame
   img.onload = () => {
     canvas.width = img.width;
     canvas.height = img.height;
     ctx.drawImage(img, 0, 0);
     document.getElementById('resolution').textContent = img.width + 'x' + img.height;
 
-    // Draw detections
-    if (msg.detections && msg.detections.length > 0) {
-      msg.detections.forEach(det => {
+    // Draw detections from latest metadata
+    if (latestMeta && latestMeta.detections && latestMeta.detections.length > 0) {
+      latestMeta.detections.forEach(det => {
         const [x1, y1, x2, y2] = det.bbox;
         ctx.lineWidth = 3;
         if (det.matched) {
@@ -266,7 +275,6 @@ function handleFrame(msg) {
         ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
         ctx.shadowBlur = 0;
 
-        // Label
         const label = det.matched
           ? 'MATCH ' + Math.round(det.confidence) + '%'
           : 'Person ' + Math.round(det.confidence) + '%';
@@ -279,28 +287,25 @@ function handleFrame(msg) {
       });
     }
   };
-  img.src = 'data:image/jpeg;base64,' + msg.frame;
+  img.src = pendingBlob;
+}
 
-  // Update stats
+function updateMeta(msg) {
   document.getElementById('fps').textContent = msg.fps;
   document.getElementById('frameCount').textContent = msg.frame_count;
 
-  // State badge
   const badge = document.getElementById('stateBadge');
   badge.textContent = msg.state.toUpperCase();
   badge.className = 'state-badge state-' + msg.state;
 
-  // GPS
   const gps = msg.gps;
   document.getElementById('gpsLat').textContent = gps.lat ? gps.lat.toFixed(6) : '—';
   document.getElementById('gpsLng').textContent = gps.lng ? gps.lng.toFixed(6) : '—';
   document.getElementById('gpsAlt').textContent = gps.alt ? gps.alt.toFixed(1) + 'm' : '—';
 
-  // Waypoint + target
   document.getElementById('waypoint').textContent = msg.waypoint;
   document.getElementById('targetAddr').textContent = msg.target_address || '—';
 
-  // Detection list
   const detList = document.getElementById('detList');
   if (msg.detections && msg.detections.length > 0) {
     detList.innerHTML = msg.detections.map(d => {
