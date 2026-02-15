@@ -12,6 +12,7 @@ import com.facebook.react.defaults.DefaultReactNativeHost
 import com.facebook.soloader.SoLoader
 import com.dronecontrol.screencapture.ScreenCapturePackage
 import com.dronecontrol.accessibility.TouchInjectorPackage
+import com.dronecontrol.applauncher.AppLauncherPackage
 
 class MainApplication : Application(), ReactApplication {
 
@@ -21,6 +22,7 @@ class MainApplication : Application(), ReactApplication {
                 PackageList(this).packages.apply {
                     add(ScreenCapturePackage())
                     add(TouchInjectorPackage())
+                    add(AppLauncherPackage())
                 }
 
             override fun getJSMainModuleName(): String = "index"

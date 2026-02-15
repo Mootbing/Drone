@@ -24,7 +24,7 @@ import Geolocation from '@react-native-community/geolocation';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { launchImageLibrary, launchCamera } from 'react-native-image-picker';
 import wsService from '../services/WebSocketService';
-import { getReferencePhoto, loadReferencePhoto, setGlobalReferencePhoto } from './SettingsScreen';
+import { getReferencePhoto, loadReferencePhoto, setGlobalReferencePhoto, launchDroneApp } from './SettingsScreen';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 type GeoResult = {
@@ -137,7 +137,6 @@ export default function InputScreen({ navigation }: Props) {
   const mapWebViewRef = useRef<any>(null);
   const [routeSummary, setRouteSummary] = useState<{distance: string; duration: string} | null>(null);
   const [loadingRoute, setLoadingRoute] = useState(false);
-  const [deliveryMessage, setDeliveryMessage] = useState('moo');
   const [referencePhoto, setReferencePhoto] = useState<string | null>(getReferencePhoto());
   const [connected, setConnected] = useState(wsService.isConnected);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -406,13 +405,16 @@ export default function InputScreen({ navigation }: Props) {
       type: 'mission_input',
       address: address.trim(),
       reference_photo: referencePhoto,
-      delivery_message: deliveryMessage.trim() || 'You have a delivery!',
+      delivery_message: 'You have a delivery!',
       gps: userLocation ? { lat: userLocation.lat, lng: userLocation.lng, alt: 0 } : { lat: selectedCoords.lat, lng: selectedCoords.lng, alt: 0 },
       waypoints,
     });
 
-    navigation.navigate('Watch', { deliveryMessage: deliveryMessage.trim() });
-  }, [address, selectedCoords, referencePhoto, deliveryMessage, connected, navigation]);
+    // Open the selected drone app
+    launchDroneApp();
+
+    navigation.navigate('Watch');
+  }, [address, selectedCoords, referencePhoto, connected, navigation]);
 
   return (
     <View style={styles.container}>
@@ -577,20 +579,6 @@ export default function InputScreen({ navigation }: Props) {
           </View>
         )}
 
-        {/* Delivery message */}
-        {selectedCoords && (
-          <View style={styles.messageCard}>
-            <Text style={styles.messageLabel}>Delivery message</Text>
-            <TextInput
-              style={styles.messageInput}
-              value={deliveryMessage}
-              onChangeText={setDeliveryMessage}
-              placeholder="Message for recipient..."
-              placeholderTextColor="#555"
-            />
-          </View>
-        )}
-
         {/* Spacer for bottom button */}
         <View style={{ height: 100 }} />
       </ScrollView>
@@ -605,12 +593,6 @@ export default function InputScreen({ navigation }: Props) {
           <Text style={styles.bookBtnText}>
             {!connected ? 'Not connected' : 'Book Delivery'}
           </Text>
-        </TouchableOpacity>
-        <TouchableOpacity
-          style={styles.testBtn}
-          onPress={() => navigation.navigate('Watch', { testMode: true })}
-        >
-          <Text style={styles.testBtnText}>Test</Text>
         </TouchableOpacity>
       </View>
     </View>
@@ -847,28 +829,6 @@ const styles = StyleSheet.create({
   },
 
   // Delivery message
-  messageCard: {
-    marginTop: 16,
-    backgroundColor: '#111',
-    borderRadius: 14,
-    padding: 16,
-    borderWidth: 1,
-    borderColor: '#222',
-  },
-  messageLabel: {
-    fontSize: 11,
-    color: '#666',
-    fontWeight: '700',
-    textTransform: 'uppercase',
-    letterSpacing: 0.5,
-    marginBottom: 8,
-  },
-  messageInput: {
-    color: '#fff',
-    fontSize: 15,
-    padding: 0,
-  },
-
   // Bottom bar
   bottomBar: {
     position: 'absolute',
@@ -897,19 +857,5 @@ const styles = StyleSheet.create({
     color: '#000',
     fontSize: 17,
     fontWeight: 'bold',
-  },
-  testBtn: {
-    backgroundColor: '#222',
-    borderRadius: 12,
-    paddingVertical: 16,
-    paddingHorizontal: 24,
-    alignItems: 'center',
-    borderWidth: 1,
-    borderColor: '#333',
-  },
-  testBtnText: {
-    color: '#fff',
-    fontSize: 17,
-    fontWeight: '600',
   },
 });

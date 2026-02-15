@@ -11,11 +11,12 @@ import InputScreen from './src/screens/InputScreen';
 import WatchScreen from './src/screens/WatchScreen';
 import DeliveryScreen from './src/screens/DeliveryScreen';
 import SettingsScreen, { loadReferencePhoto } from './src/screens/SettingsScreen';
+import ActionRecorderScreen, { loadActionPoints } from './src/screens/ActionRecorderScreen';
 
 const Stack = createNativeStackNavigator();
 
 export default function App() {
-  useEffect(() => { loadReferencePhoto(); }, []);
+  useEffect(() => { loadReferencePhoto(); loadActionPoints(); }, []);
 
   return (
     <NavigationContainer>
@@ -47,6 +48,11 @@ export default function App() {
           name="Settings"
           component={SettingsScreen}
           options={{ title: 'Settings' }}
+        />
+        <Stack.Screen
+          name="ActionRecorder"
+          component={ActionRecorderScreen}
+          options={{ title: 'Action Recorder' }}
         />
         <Stack.Screen
           name="Watch"
