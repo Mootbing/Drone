@@ -9,8 +9,8 @@ type MessageHandler = (message: PCToPhone) => void;
 type ConnectionHandler = (connected: boolean) => void;
 
 const HEARTBEAT_INTERVAL_MS = 5000;
-const RECONNECT_DELAY_MS = 3000;
-const MAX_RECONNECT_ATTEMPTS = 10;
+const RECONNECT_DELAY_MS = 2000;
+const MAX_RECONNECT_ATTEMPTS = 999;
 
 class WebSocketService {
   private ws: WebSocket | null = null;
