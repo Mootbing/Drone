@@ -7,10 +7,11 @@ import logging
 import time
 from typing import Optional
 
+import cv2
 import numpy as np
-from fastapi import WebSocket, WebSocketDisconnect
+from fastapi import WebSocket
 
-from config import IDENTIFICATION_RANGE_M, WAYPOINT_REACHED_RADIUS_M
+from config import IDENTIFICATION_RANGE_M, WAYPOINT_REACHED_RADIUS_M, REKOGNITION_SIMILARITY_THRESHOLD
 from state_machine import StateMachine, DroneState
 from navigation.geocoder import geocode_address
 from navigation.router import get_route_waypoints
@@ -19,21 +20,10 @@ from navigation.obstacle_avoidance import detect_obstacles
 from identification.person_detector import detect_persons
 from identification.face_matcher import compare_face
 from identification.approach import compute_approach_command
+from navigation.geo_utils import haversine_m
 from models.sam_loader import SAMInference
 
 logger = logging.getLogger(__name__)
-
-
-def _haversine_m(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
-    """Haversine distance in meters between two GPS coordinates."""
-    import math
-    R = 6_371_000
-    dlat = math.radians(lat2 - lat1)
-    dlng = math.radians(lng2 - lng1)
-    a = (math.sin(dlat / 2) ** 2 +
-         math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) *
-         math.sin(dlng / 2) ** 2)
-    return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
 
 class ConnectionManager:
@@ -43,15 +33,19 @@ class ConnectionManager:
         self.ws: Optional[WebSocket] = None
         self.sm = StateMachine()
         self.sam = sam
-        self._last_heartbeat = 0.0
 
     async def connect(self, websocket: WebSocket):
+        if self.ws is not None:
+            await websocket.close(code=1008, reason="Another client is already connected")
+            return False
         await websocket.accept()
         self.ws = websocket
         logger.info("Phone connected")
+        return True
 
     async def disconnect(self):
         self.ws = None
+        self.sm = StateMachine()  # reset state for next connection
         logger.info("Phone disconnected")
 
     async def send_json(self, data: dict):
@@ -103,7 +97,7 @@ class ConnectionManager:
         elif msg_type == "abort":
             await self._handle_abort()
         elif msg_type == "delivery_confirmed":
-            self._handle_delivery_confirmed()
+            await self._handle_delivery_confirmed()
         elif msg_type == "ping":
             await self.send_json({"type": "pong", "timestamp": time.time()})
         else:
@@ -113,9 +107,23 @@ class ConnectionManager:
 
     async def _handle_mission_input(self, msg: dict):
         """Process mission start: address + reference photo + delivery message."""
-        address = msg.get("address", "")
+        if self.sm.state != DroneState.INPUT:
+            await self.send_json({
+                "type": "error",
+                "message": "Cannot start new mission in current state",
+            })
+            return
+
+        address = msg.get("address", "").strip()[:500]
         reference_b64 = msg.get("reference_photo", "")
         delivery_message = msg.get("delivery_message", "")
+
+        if not address:
+            await self.send_json({"type": "error", "message": "Address is required"})
+            return
+        if not reference_b64:
+            await self.send_json({"type": "error", "message": "Reference photo is required"})
+            return
 
         # Geocode address
         result = geocode_address(address)
@@ -127,7 +135,11 @@ class ConnectionManager:
             return
 
         lat, lng = result
-        reference_bytes = base64.b64decode(reference_b64) if reference_b64 else None
+        try:
+            reference_bytes = base64.b64decode(reference_b64)
+        except Exception:
+            await self.send_json({"type": "error", "message": "Invalid reference photo data"})
+            return
 
         self.sm.set_target(address, lat, lng, reference_bytes, delivery_message)
 
@@ -160,7 +172,11 @@ class ConnectionManager:
         if not frame_b64:
             return
 
-        frame_bytes = base64.b64decode(frame_b64)
+        try:
+            frame_bytes = base64.b64decode(frame_b64)
+        except Exception:
+            logger.warning("Invalid base64 frame data")
+            return
         frame_arr = _decode_jpeg(frame_bytes)
         if frame_arr is None:
             return
@@ -180,7 +196,7 @@ class ConnectionManager:
         ctx = self.sm.context
 
         # Check if we've reached the destination zone
-        dist = _haversine_m(ctx.current_lat, ctx.current_lng,
+        dist = haversine_m(ctx.current_lat, ctx.current_lng,
                             ctx.target_lat, ctx.target_lng)
         if dist < IDENTIFICATION_RANGE_M:
             self.sm.transition(DroneState.IDENTIFICATION)
@@ -191,7 +207,7 @@ class ConnectionManager:
         # Advance waypoint if close enough
         if ctx.current_waypoint_idx < len(ctx.waypoints):
             wp = ctx.waypoints[ctx.current_waypoint_idx]
-            wp_dist = _haversine_m(ctx.current_lat, ctx.current_lng,
+            wp_dist = haversine_m(ctx.current_lat, ctx.current_lng,
                                    wp["lat"], wp["lng"])
             if wp_dist < WAYPOINT_REACHED_RADIUS_M:
                 ctx.current_waypoint_idx += 1
@@ -199,7 +215,9 @@ class ConnectionManager:
                             ctx.current_waypoint_idx, len(ctx.waypoints))
 
         # Check obstacles via SAM
-        masks = self.sam.generate_masks(frame)
+        masks = await asyncio.get_event_loop().run_in_executor(
+            None, self.sam.generate_masks, frame
+        )
         obstacle_cmd = detect_obstacles(frame, masks)
 
         if obstacle_cmd:
@@ -229,7 +247,9 @@ class ConnectionManager:
     async def _process_identification(self, frame: np.ndarray):
         """Identification mode: find and match target person."""
         ctx = self.sm.context
-        masks = self.sam.generate_masks(frame)
+        masks = await asyncio.get_event_loop().run_in_executor(
+            None, self.sam.generate_masks, frame
+        )
         persons = detect_persons(frame, masks)
 
         if not persons:
@@ -246,7 +266,7 @@ class ConnectionManager:
                 continue
 
             match_result = compare_face(ctx.reference_photo_bytes, face_crop)
-            if match_result and match_result["confidence"] >= 90.0:
+            if match_result and match_result["confidence"] >= REKOGNITION_SIMILARITY_THRESHOLD:
                 ctx.target_bbox = bbox
                 ctx.match_confidence = match_result["confidence"]
                 self.sm.transition(DroneState.APPROACH)
@@ -267,7 +287,9 @@ class ConnectionManager:
     async def _process_approach(self, frame: np.ndarray):
         """Approach mode: fly toward identified person."""
         ctx = self.sm.context
-        masks = self.sam.generate_masks(frame)
+        masks = await asyncio.get_event_loop().run_in_executor(
+            None, self.sam.generate_masks, frame
+        )
         persons = detect_persons(frame, masks)
 
         # Re-match to track the person
@@ -309,16 +331,16 @@ class ConnectionManager:
         await self.send_hover()
         await self.send_mode_change("hover", "Mission aborted — drone hovering.")
 
-    def _handle_delivery_confirmed(self):
+    async def _handle_delivery_confirmed(self):
         """Handle delivery confirmation from phone."""
         self.sm.transition(DroneState.DONE)
+        await self.send_mode_change("done", "Mission complete. Delivery confirmed.")
         logger.info("Delivery confirmed. Mission complete.")
 
 
 def _decode_jpeg(data: bytes) -> Optional[np.ndarray]:
     """Decode JPEG bytes to numpy array (BGR)."""
     try:
-        import cv2
         arr = np.frombuffer(data, dtype=np.uint8)
         return cv2.imdecode(arr, cv2.IMREAD_COLOR)
     except Exception:

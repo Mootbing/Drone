@@ -7,6 +7,7 @@ and computes avoidance commands.
 import logging
 from typing import Dict, List, Optional
 
+import cv2
 import numpy as np
 
 from config import OBSTACLE_CENTER_THRESHOLD, OBSTACLE_MIN_AREA_FRACTION
@@ -48,7 +49,6 @@ def detect_obstacles(
 
     # Convert frame to HSV for color classification
     try:
-        import cv2
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
     except Exception:
         return None

@@ -21,12 +21,7 @@ SAM_CHECKPOINT_PATH = os.getenv("SAM_CHECKPOINT_PATH", "models/sam_vit_b_01ec64.
 SAM_DEVICE = os.getenv("SAM_DEVICE", "cuda")  # "cuda" or "cpu"
 
 # --- Navigation ---
-CRUISE_ALTITUDE_M = float(os.getenv("CRUISE_ALTITUDE_M", "30.0"))
 WAYPOINT_REACHED_RADIUS_M = float(os.getenv("WAYPOINT_REACHED_RADIUS_M", "10.0"))
 IDENTIFICATION_RANGE_M = float(os.getenv("IDENTIFICATION_RANGE_M", "50.0"))
 OBSTACLE_CENTER_THRESHOLD = 0.3  # fraction of frame center considered "in path"
 OBSTACLE_MIN_AREA_FRACTION = 0.05  # minimum segment area to count as obstacle
-
-# --- Frame Processing ---
-FRAME_WIDTH = 1280
-FRAME_HEIGHT = 720

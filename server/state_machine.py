@@ -29,7 +29,7 @@ VALID_TRANSITIONS = {
     DroneState.IDENTIFICATION: {DroneState.APPROACH, DroneState.HOVER},
     DroneState.APPROACH: {DroneState.DELIVERY, DroneState.IDENTIFICATION, DroneState.HOVER},
     DroneState.DELIVERY: {DroneState.DONE, DroneState.HOVER},
-    DroneState.DONE: set(),
+    DroneState.DONE: {DroneState.INPUT},
     DroneState.HOVER: {DroneState.NAVIGATION, DroneState.IDENTIFICATION, DroneState.INPUT},
 }
 

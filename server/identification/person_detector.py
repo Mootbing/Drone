@@ -7,6 +7,7 @@ for person-shaped segments.
 import logging
 from typing import Dict, List
 
+import cv2
 import numpy as np
 
 logger = logging.getLogger(__name__)
@@ -79,7 +80,6 @@ def detect_persons(
         # Color heuristic: people tend to have skin-tone or clothing colors,
         # not sky-blue or pure green. Check if segment has varied colors.
         try:
-            import cv2
             mask_pixels = frame[seg]
             if len(mask_pixels) < 10:
                 continue

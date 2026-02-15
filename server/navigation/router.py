@@ -15,6 +15,8 @@ _client: Optional[googlemaps.Client] = None
 def _get_client() -> googlemaps.Client:
     global _client
     if _client is None:
+        if not GOOGLE_MAPS_API_KEY:
+            raise ValueError("GOOGLE_MAPS_API_KEY is not set")
         _client = googlemaps.Client(key=GOOGLE_MAPS_API_KEY)
     return _client
 

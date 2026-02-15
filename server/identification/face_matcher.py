@@ -77,9 +77,9 @@ def compare_face(
             "bounding_box": bb,
         }
 
-    except client.exceptions.InvalidParameterException:
-        logger.debug("No face detected in crop")
-        return None
-    except Exception:
-        logger.exception("Rekognition comparison failed")
+    except Exception as e:
+        if "InvalidParameterException" in type(e).__name__:
+            logger.debug("No face detected in crop")
+        else:
+            logger.exception("Rekognition comparison failed")
         return None

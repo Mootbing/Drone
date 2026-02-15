@@ -3,7 +3,7 @@
  * User enters delivery address, picks a reference photo, and types a delivery message.
  */
 
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect, useRef } from 'react';
 import {
   View,
   Text,
@@ -30,6 +30,14 @@ export default function InputScreen({ navigation }: Props) {
   const [serverUrl, setServerUrl] = useState('ws://192.168.1.100:8765/ws');
   const [connecting, setConnecting] = useState(false);
   const [connected, setConnected] = useState(false);
+  const connectionUnsubRef = useRef<(() => void) | null>(null);
+
+  // Clean up connection listener on unmount
+  useEffect(() => {
+    return () => {
+      connectionUnsubRef.current?.();
+    };
+  }, []);
 
   const pickPhoto = useCallback(async () => {
     const result = await launchImageLibrary({
@@ -60,15 +68,13 @@ export default function InputScreen({ navigation }: Props) {
   }, []);
 
   const connectToServer = useCallback(() => {
+    connectionUnsubRef.current?.(); // clean up previous listener
     setConnecting(true);
     wsService.connect(serverUrl);
 
-    const unsub = wsService.onConnectionChange((isConnected) => {
+    connectionUnsubRef.current = wsService.onConnection((isConnected) => {
       setConnected(isConnected);
       setConnecting(false);
-      if (isConnected) {
-        unsub();
-      }
     });
   }, [serverUrl]);
 

@@ -3,7 +3,7 @@
  * Handles connection management, heartbeat, and message routing.
  */
 
-import { PhoneToPC, PCToPhone, CommandMessage, ModeChangeMessage } from '../types/protocol';
+import { PhoneToPC, PCToPhone } from '../types/protocol';
 
 type MessageHandler = (message: PCToPhone) => void;
 type ConnectionHandler = (connected: boolean) => void;

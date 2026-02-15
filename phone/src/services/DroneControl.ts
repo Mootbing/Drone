@@ -4,7 +4,7 @@
  */
 
 import { NativeModules } from 'react-native';
-import { Direction, MovementCommand } from '../types/protocol';
+import { Direction, CommandMessage } from '../types/protocol';
 
 const { TouchInjectorModule } = NativeModules;
 
@@ -47,7 +47,7 @@ class DroneControlService {
   /**
    * Execute a movement command by injecting a swipe gesture.
    */
-  async executeCommand(command: MovementCommand): Promise<void> {
+  async executeCommand(command: CommandMessage): Promise<void> {
     if (command.action === 'hover') {
       return; // No gesture needed for hover
     }

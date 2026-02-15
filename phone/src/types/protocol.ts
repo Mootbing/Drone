@@ -72,11 +72,13 @@ export interface CommandMessage {
 }
 
 export type DroneMode =
+  | 'input'
   | 'navigation'
   | 'identification'
   | 'approach'
   | 'delivery'
-  | 'hover';
+  | 'hover'
+  | 'done';
 
 export interface ModeChangeMessage {
   type: 'mode_change';

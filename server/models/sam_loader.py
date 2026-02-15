@@ -3,6 +3,7 @@
 import logging
 from typing import Dict, List, Optional
 
+import cv2
 import numpy as np
 
 from config import SAM_MODEL_TYPE, SAM_CHECKPOINT_PATH, SAM_DEVICE
@@ -28,11 +29,9 @@ class SAMInference:
                         SAM_MODEL_TYPE, SAM_CHECKPOINT_PATH, SAM_DEVICE)
 
             device = SAM_DEVICE
-            if device == "cuda":
-                import torch
-                if not torch.cuda.is_available():
-                    logger.warning("CUDA not available, falling back to CPU")
-                    device = "cpu"
+            if device == "cuda" and not torch.cuda.is_available():
+                logger.warning("CUDA not available, falling back to CPU")
+                device = "cpu"
 
             sam = sam_model_registry[SAM_MODEL_TYPE](checkpoint=SAM_CHECKPOINT_PATH)
             sam.to(device=device)
@@ -76,7 +75,6 @@ class SAMInference:
             return []
 
         try:
-            import cv2
             # SAM expects RGB
             rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
             masks = self._mask_generator.generate(rgb)

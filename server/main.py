@@ -1,6 +1,9 @@
 """FastAPI entry point for the drone control server."""
 
+import asyncio
 import logging
+from contextlib import asynccontextmanager
+
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
@@ -14,17 +17,20 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Drone Control Server")
-
-# Load SAM model at startup
+# SAM model and connection manager (initialized in lifespan)
 sam = SAMInference()
 manager = ConnectionManager(sam)
 
 
-@app.on_event("startup")
-async def startup():
+@asynccontextmanager
+async def lifespan(app: FastAPI):
     logger.info("Drone Control Server starting on %s:%d", WS_HOST, WS_PORT)
-    sam.load()
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(None, sam.load)
+    yield
+
+
+app = FastAPI(title="Drone Control Server", lifespan=lifespan)
 
 
 @app.get("/health")
@@ -34,7 +40,9 @@ async def health():
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
-    await manager.connect(websocket)
+    connected = await manager.connect(websocket)
+    if not connected:
+        return
     try:
         while True:
             data = await websocket.receive_text()

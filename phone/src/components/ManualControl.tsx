@@ -12,7 +12,7 @@ import {
   GestureResponderEvent,
   PanResponderGestureState,
 } from 'react-native';
-import wsService from '../services/WebSocketService';
+import droneControl from '../services/DroneControl';
 import { Direction } from '../types/protocol';
 
 const DEAD_ZONE = 20; // pixels before movement registers
@@ -20,15 +20,6 @@ const PAD_SIZE = 150;
 
 export default function ManualControl() {
   const sendCommand = useCallback((direction: Direction, intensity: number) => {
-    wsService.send({
-      type: 'status',
-      battery: 100,
-      signal: 'strong',
-      mode: 'navigation',
-    });
-    // Send as a frame-like message that triggers server command echo,
-    // or directly inject via drone control
-    const { droneControl } = require('../services/DroneControl');
     droneControl.executeCommand({
       type: 'command',
       action: 'move',

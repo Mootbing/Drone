@@ -3,7 +3,7 @@
  * Runs screen capture and streams frames to PC; receives and executes commands.
  */
 
-import React, { useEffect, useState, useCallback, useRef } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 import {
   View,
   Text,
@@ -18,7 +18,7 @@ import droneControl from '../services/DroneControl';
 import NavigationOverlay from '../components/NavigationOverlay';
 import StatusBar from '../components/StatusBar';
 import ManualControl from '../components/ManualControl';
-import { DroneMode, PCToPhone, MovementCommand } from '../types/protocol';
+import { DroneMode, PCToPhone, CommandMessage } from '../types/protocol';
 
 type Props = {
   navigation: NativeStackNavigationProp<any>;
@@ -31,15 +31,25 @@ export default function WatchScreen({ navigation, route }: Props) {
   const [lastDirection, setLastDirection] = useState('');
   const [showManual, setShowManual] = useState(false);
   const [confidence, setConfidence] = useState<number | null>(null);
+  const [connected, setConnected] = useState(wsService.isConnected);
   const deliveryMessage = route.params?.deliveryMessage || 'You have a delivery!';
+
+  // Track connection state reactively
+  useEffect(() => {
+    const unsub = wsService.onConnection(setConnected);
+    return unsub;
+  }, []);
 
   // Handle incoming server messages
   useEffect(() => {
     const unsub = wsService.onMessage((msg: PCToPhone) => {
       switch (msg.type) {
-        case 'command':
-          handleCommand(msg as MovementCommand);
+        case 'command': {
+          const cmd = msg as CommandMessage;
+          setLastDirection(cmd.action === 'hover' ? 'HOVER' : cmd.direction);
+          droneControl.executeCommand(cmd);
           break;
+        }
         case 'mode_change':
           setMode(msg.mode);
           setStatusMessage(msg.message);
@@ -89,13 +99,8 @@ export default function WatchScreen({ navigation, route }: Props) {
 
     return () => {
       frameUnsub?.();
-      screenCapture.stopCapture();
+      screenCapture.stopCapture().catch(console.error);
     };
-  }, []);
-
-  const handleCommand = useCallback(async (cmd: MovementCommand) => {
-    setLastDirection(cmd.action === 'hover' ? 'HOVER' : cmd.direction);
-    await droneControl.executeCommand(cmd);
   }, []);
 
   const handleAbort = useCallback(() => {
@@ -123,7 +128,7 @@ export default function WatchScreen({ navigation, route }: Props) {
       <StatusBar
         mode={mode}
         message={statusMessage}
-        connected={wsService.isConnected}
+        connected={connected}
       />
 
       <NavigationOverlay
