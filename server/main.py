@@ -181,6 +181,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <div class="panel">
       <div class="panel-title">Detection</div>
       <button class="toggle-btn toggle-off" id="detectBtn" onclick="toggleDetect()">Detect: OFF</button>
+      <div style="color:#555;font-size:11px;margin-top:6px">Runs every 10th frame (~1 detect/sec)</div>
     </div>
     <div class="panel">
       <div class="panel-title">Stream</div>

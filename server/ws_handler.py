@@ -33,6 +33,9 @@ class ConnectionManager:
         self.sm = StateMachine()
         self.person_detector = PersonDetector()
         self.detect_enabled: bool = False
+        self._detect_interval: int = 10  # run YOLO every Nth frame
+        self._detect_frame_counter: int = 0
+        self._cached_detections: list = []
         # Dashboard viewers
         self.dashboard_clients: List[WebSocket] = []
         self.latest_frame_b64: Optional[str] = None
@@ -442,15 +445,24 @@ class ConnectionManager:
         return detections
 
     async def _process_detect_only(self, frame: np.ndarray) -> list:
-        """Run person detection without face matching or navigation commands."""
+        """Run person detection without face matching or navigation commands.
+
+        Only runs YOLO every N frames to maintain high FPS.
+        Reuses cached detections for in-between frames.
+        """
+        self._detect_frame_counter += 1
+        if self._detect_frame_counter % self._detect_interval != 1 and self._cached_detections:
+            return self._cached_detections
+
         persons = await asyncio.get_event_loop().run_in_executor(
             None, self.person_detector.detect, frame
         )
-        return [
+        self._cached_detections = [
             {"bbox": p["bbox"], "type": "person", "matched": False,
              "confidence": round(p["confidence"] * 100, 1)}
             for p in persons
         ]
+        return self._cached_detections
 
     async def handle_dashboard_message(self, raw: str):
         """Handle incoming messages from dashboard clients."""
