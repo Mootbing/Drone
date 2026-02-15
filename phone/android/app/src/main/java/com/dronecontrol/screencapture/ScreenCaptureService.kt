@@ -40,11 +40,11 @@ class ScreenCaptureService : Service() {
         const val CHANNEL_ID = "screen_capture_channel"
         const val NOTIFICATION_ID = 1
 
-        // Target capture dimensions (720p)
-        const val CAPTURE_WIDTH = 1280
-        const val CAPTURE_HEIGHT = 720
-        const val JPEG_QUALITY = 40
-        const val CAPTURE_INTERVAL_MS = 16L // ~60fps
+        // Target capture dimensions (native resolution)
+        const val CAPTURE_WIDTH = 2400
+        const val CAPTURE_HEIGHT = 1080
+        const val JPEG_QUALITY = 85
+        const val CAPTURE_INTERVAL_MS = 100L // ~10fps
 
         // Set by ScreenCaptureModule after permission granted
         var projectionResultCode: Int = 0
