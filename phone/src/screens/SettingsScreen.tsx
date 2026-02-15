@@ -70,6 +70,8 @@ async function savePhoto(base64: string | null) {
       await AsyncStorage.removeItem(STORAGE_KEY);
     }
   } catch {}
+  // Send to server immediately if connected
+  wsService.send({ type: 'reference_photo', photo: base64 || '' });
 }
 
 export function launchDroneApp() {
